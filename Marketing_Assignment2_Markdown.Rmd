@@ -1,0 +1,274 @@
+---
+title: "Conjoint Analysis with Fashion data"
+author: "Mark Preston"
+date: "November 1, 2018"
+output: 
+  html_document: 
+    fig_height: 6.5
+    fig_width: 10.5
+---
+
+***
+
+###Introduction: Understanding consumer fashion preferences using conjoint methods
+
+For this assignment, I'll be using the fashion data to perform conjoint analysis. The method helps develop an understanding for consumer preferences for different products. Using the data, I'll try several different methods to ensure the best analytical solution can be found to aid the product concept development exercise. As a methodological note, there are 400 respondents here, each of whom have 8 responses to product designs.
+
+```{r loading data and packages, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(gridExtra)
+library(AlgDesign)
+library(conjoint)
+library(lme4)
+library(knitr)
+library(kableExtra)
+
+#setting ggplot preference
+theme_set(
+  theme_minimal()
+)
+
+#custom table function
+custom_kable <- function(x){
+  kable(x, format = "html") %>%
+    kable_styling(bootstrap_options = "striped")
+}
+
+fashion <- read.table("fashiondata.txt", sep = "", stringsAsFactors = F) %>%
+  rename_all(tolower) %>%
+  mutate(respondent = rep(1:400, each = 8)) %>%
+  select(respondent, everything())
+```
+
+***
+
+###Exploratory Data Analysis: Reviewing consumers and their fashion preferences
+
+Before the modelling phase, I'll do an exploratory analysis to review the data I'm working with. As a starting point here, I'm doing a quick summary. It looks like the various attributes are balanced for price, quality, and fashion while the ratings are also fairly uniform. The data contains more women than men and also skews younger with the 16-24 age group as the largest.
+
+```{r data summary}
+fashion %>%
+  select(-respondent) %>%
+  mutate_all(as.factor) %>%
+  summary() %>%
+  custom_kable()
+```
+
+Given there are three product feature variables (fashion style, quality, and price), there are eight possible product design combinations. These combinations can be seen below. Each design option is balanced.
+
+```{r feature mix}
+fashion %>%
+  count(fashion, quality, price) %>%
+  custom_kable()
+```
+
+Having seen the design combinations, I wanted to see an initial chart with each variable permutation and subsequent rating. To do so, I developed a faceted grid plot so all four variables, and their counts, could be reviewed at once. It appears, not surprisingly, that the consumers here have high ratings for low price, high quality, and modern options (n = 245). The second largest group is high price, low quality, and traditional options with a 1 rating (n = 242). 
+
+Those two don't seem to surprising but, some other combinations stick out. For example, modern, low quality, and low price with a 5 rating has a fairly high concentration (n = 149). The traditional fashion option at high price in general do not seem popular either. None of these have been statistically validated but, the chart is a good first glance at the various combination preferences.
+
+```{r feature preference bar chart}
+fashion %>%
+  count(fashion, quality, price, rating) %>%
+  mutate(rating = as.character(rating)) %>%
+  ggplot(aes(price, n, fill = rating)) +
+  geom_col(position = "dodge") +
+  facet_grid(fashion ~ quality) +
+  theme_bw() +
+  labs(title = "Consumer ratings split by style, price, and fashion style",
+       subtitle = "Largest group: Modern, high quality, and low price with a 5 rating",
+       x = NULL,
+       y = NULL)
+```
+
+Another missing element from the initial fashion preference combinations is the consumer profile details. The added dimensions for age and gender present some visualization challenges but, I've created price, fashion, and quality charts for each and then displayed them in one grid so all six variables can be reviewed at once. Despite being slightly busy (and not appropriate for sharing directly with the business) it provides a first glimpse into the various consumer preferences by category. Young women really stick out here. The group seems to have low ratings for high prices, traditional clothes, and low quality (and high for low price, modern, high quality). Overall, this helps situate the product preferences for the consumer groups mocing into the modelling phase.
+
+```{r three panel vis, fig.width=17, fig.height=9.5}
+price <- fashion %>%
+  count(gender, age, price, rating) %>%
+  mutate(rating = as.character(rating)) %>%
+  ggplot(aes(price, n, fill = rating)) +
+  geom_text(aes(label = rating), position = position_dodge(width = 0.9), vjust = -0.25) +
+  geom_col(position = "dodge", show.legend = F) +
+  facet_grid(gender ~ age) +
+  theme_bw() +
+  labs(title = "Price",
+       subtitle = "Largest group: Young women with 1 rating for high prices",
+       x = NULL,
+       y = NULL)
+
+fashion_panel <- fashion %>%
+  count(gender, age, fashion, rating) %>%
+  mutate(rating = as.character(rating)) %>%
+  ggplot(aes(fashion, n, fill = rating)) +
+  geom_text(aes(label = rating), position = position_dodge(width = 0.9), vjust = -0.25) +
+  geom_col(position = "dodge",  show.legend = F) +
+  facet_grid(gender ~ age) +
+  theme_bw() +
+  labs(title = "Fashion",
+       subtitle = "Largest group: Young women with 1 rating for traditional styles",
+       x = NULL,
+       y = NULL)
+
+quality <- fashion %>%
+  count(gender, age, quality, rating) %>%
+  mutate(rating = as.character(rating)) %>%
+  ggplot(aes(quality, n, fill = rating)) +
+  geom_text(aes(label = rating), position = position_dodge(width = 0.9), vjust = -0.25) +
+  geom_col(position = "dodge", show.legend = F) +
+  facet_grid(gender ~ age) +
+  theme_bw() +
+  labs(title = "Quality",
+       subtitle = "Largest group: Young women with 1 rating for low quality clothes",
+       x = NULL,
+       y = NULL)
+
+grid.arrange(price, fashion_panel, quality, nrow = 1)
+```
+
+As another interest point, I wanted to see a top 10 for all the variables at once. The most populous design choice is young women who dislike low quality traditional clothing with a high price. For males, the largest count is for young men who have a high rating for modern, high quality, and low price fashion choices.
+
+```{r top 10 count for all features}
+fashion %>%
+  count(gender, age, fashion, quality, price, rating) %>%
+  arrange(desc(n)) %>%
+  slice(1:10) %>%
+  custom_kable()
+```
+
+Finally, since the previous responses are all aggregated preferences by individual people, I'm highlighting one respondent's preferences here. This person is a male aged 25-39 who appears to like the high quality modern options at either price point and the traditional high quality items at low costs. These ratings will be used for all the respondents in the modelling phase.
+
+```{r respondent 1 ratings}
+fashion %>%
+  filter(respondent == 1) %>%
+  custom_kable()
+```
+
+
+***
+
+###Conjoint in Action: Reviewing and quantifying consumer preferences
+
+In this section, I'll develop analyses using the following methods:
+
+- Partworth estimation for the individual
+
+- Partworth estimations by combining all individual responses
+
+- Partworth estimation using a linear mixed model
+
+- Partworth estimation of mixed effects using MCMC regression
+
+Before getting to the modelling though, there are several data frames that need to be constructed. These include all the consumers preferences spread out in a matrix, all ratings in a single column, the variable levels, and the factorial design.
+
+```{r partworth set up}
+preference_matrix <- matrix(nrow = 400, ncol = 8, data = fashion$rating) %>%
+  as.data.frame()
+
+total_preferencs <- fashion %>%
+  select(rating)
+
+variable_levels <- fashion %>%
+  select(fashion, quality, price) %>%
+  gather(value = "levels") %>%
+  filter(duplicated(levels) == F) %>%
+  select(-key)
+
+factorial_designs <- gen.factorial(levels = c(2, 2, 2), 
+                                   nVars = 3, 
+                                   varNames = c("fashion", "quality", "price")) %>%
+  mutate_all(as.factor)
+
+design_model <- model.matrix(~., data = factorial_designs)
+```
+
+####Individual Partworth Analysis
+
+The first model will develop individual coefficients, called partworths, for each design variable. These values indicate which feature the consumer liked most or least. Taken together, an overall feature importance value can be derived for the respondent.
+
+I've develop a model for every respondent while also creating one for the first person. The individual summary shows the coefficient values with the respective p-values. Here, it appears consumer one has price as the least important variable given the significant negative coefficient. This analysis could be done for each person.
+
+```{r individual partworths}
+individual_partworth <- lm(t(preference_matrix) ~ design_model)
+
+respondent_one_part <- lm(t(preference_matrix[1,]) ~ design_model)
+
+summary(respondent_one_part)
+```
+
+To continue the importance focus, I've put together a data frame of the coefficients for every respondent. Since the second set of coefficients is absent, I've also added them in here as well. Given these features all have two levels, the second coefficients are just the opposite of the first. Using these, an overall importance metric for variable can be derived. I've included a histograms of for each variable importance metric below. It appears fashion has the largest concetration towards zero while importance has the highest mode.
+
+```{r individual partworth importance- getting high & low}
+partworth_analysis <- t(individual_partworth$coefficients) %>% 
+  as.data.frame() %>%
+  select(-1:-2) %>%
+  rename(fashion_1 = design_modelfashion1,
+         quality_1 = design_modelquality1,
+         price_1 = design_modelprice1) %>%
+  mutate(fashion_2 = fashion_1 * -1,
+         quality_2 = quality_1 * -1,
+         price_2 = price_1 * -1,
+         fashion_importance = abs(fashion_1) + abs(fashion_2),
+         quality_importance = abs(quality_1) + abs(quality_2),
+         price_importance = abs(price_1) + abs(price_2))
+
+partworth_sum <- partworth_analysis %>%
+  select(fashion_importance, quality_importance, price_importance) %>%
+  rowSums()
+
+partworth_analysis <- partworth_analysis %>%
+  mutate_at(vars(fashion_importance, 
+                price_importance, 
+                quality_importance), function(x) x / partworth_sum)
+
+partworth_analysis %>%
+  select(fashion_importance, quality_importance, price_importance) %>%
+  gather(key = "variable", value = "coefficient") %>%
+  ggplot(aes(coefficient, fill = variable)) +
+  geom_histogram(bins = 10, show.legend = F) +
+  facet_wrap(facets = "variable") +
+  scale_x_continuous(breaks = seq(0, 1, .2)) +
+  labs(title = "Normalized individual partworth importance coefficients",
+       subtitle = "Fashion seems to have highest concentration towards zero")
+```
+
+In the previous plot, a lot gets obfuscated in terms of how these importance variables rank person-to-person. To better evaluate how each scored, I've plotted their ranks here. Doing this shows that quality actually does have the highest number of first place ranks while fashion has the most last place ranks. Price seems to be a much more neutral importance variable using this method.
+
+```{r imporance ranking}
+partworth_analysis %>%
+  select(fashion_importance, price_importance, quality_importance) %>%
+  apply(., 1, function(x) rank(- x)) %>%
+  t() %>%
+  as.data.frame() %>%
+  gather(key = "variable", value = "rank") %>%
+  count(variable, rank) %>%
+  ggplot(aes(rank, n, fill = variable)) +
+  geom_col(show.legend = F) +
+  facet_wrap(facets = "variable") +
+  labs(title = "Variable importance ranks for each metric- Quality has most first place ranks",
+       subtitle = "Rank values of 1.5 and 2.5 indicate ties for first and second respectively",
+       y = NULL)
+```
+
+As a final check for this modelling approach, I want to check the R squared. This can be derived using the squared correlation between the fitted and actual values. With a value of .634, the metric is fairly strong. I'll use this for comparison moving forward to other methods.
+
+```{r individual partworth model fit}
+preference_matrix %>%
+  mutate(respondent = 1:400) %>%
+  gather(key = "var", value = "actual", - respondent) %>%
+  arrange(respondent) %>%
+  mutate(fitted = as.vector(individual_partworth$fitted.values)) %>%
+  select(actual, fitted) %>%
+  summarise(model_R2 = round(cor(fitted, actual) ^ 2, 3)) %>%
+  kable(align = "left", format = "html") %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+####Aggregated Individual Partworth Analysis
+
+
+
+
+
+
+
+

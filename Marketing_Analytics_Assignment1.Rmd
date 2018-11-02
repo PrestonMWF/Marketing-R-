@@ -1,0 +1,614 @@
+---
+title: "Market Segmentation for Medicine Data"
+author: "Mark Preston"
+date: "October 21, 2018"
+output: 
+  html_document: 
+    fig_height: 6.5
+    fig_width: 10
+---
+
+***
+
+##Clustering Medicine Survey Data using Latent Class Analysis (LCA)
+
+***
+
+###Project Introduction and Exploration
+
+To begin the analysis, I've loaded the appropriate medicine data and some requisite packages. The goal of this project is simple: cluster consumers based on their survey responses into meaningful groups that can be used for various business activities. Additionally, since the explicit marketing category isn't given here, I'll work towards suggesting some categories where the analysis would be an appropriate fit. Throughout the analysis, these goals will begin to take shape.
+
+```{r loading packages and data, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(poLCA)
+library(knitr)
+library(kableExtra)
+library(nnet)
+library(caret)
+
+theme_set(
+  theme_minimal()
+)
+
+#custom table function used throughout analysis
+custom_kable <- function(x){
+  kable(x, format = "html") %>%
+    kable_styling(bootstrap_options = "striped")
+}
+
+#MASS covers up dplyr `select` so giving it another name
+selectd <- dplyr::select
+
+medicine_data <- read.csv("Medicine_data.csv", 
+                          stringsAsFactors = F, 
+                          na.strings = "")
+```
+
+To start, I've included a structural overview of the data. Looking at the variables, it's clear that all the fields are categorical fields with survey question responses. Given this, I'm going to be using latent class analysis (lca) to perform the clustering and segmentation.
+
+```{r data review}
+data.frame(
+  variable = names(medicine_data),
+  data.type = sapply(medicine_data, typeof),
+  values = sapply(medicine_data, function(x) paste0(head(x),  collapse = ", ")),
+  row.names = NULL) %>%
+  custom_kable()
+```
+
+Before moving on, I've performed some minor transformations. When looking at the data structure, I noticed that the first row was a series of letters. These seem to indicate what the type of question the column is. For example, the question asking a participant to rate if they are "constantly under stress" has an L for lifestyle. As such, I've extracted these and added them to the column names. Additionally, I dropped the original id marker and filtered out some missing values. With that, I have my initial data ready to go.
+
+```{r transforming medicine data}
+question_type <- medicine_data %>%
+  selectd(-ï..ID) %>%
+  slice(1)
+
+medicine_data <- medicine_data %>%
+  slice(-1) %>%
+  filter(!is.na(Constantly.under.stress)) %>%
+  rename_all(function(x) paste0(x, "_", medicine_data[1,])) %>%
+  rename(Alcohol.interaction.concern_A = "Concerned.about.interaction.of.medicine.w.alcohol_A",
+         Rx.interaction.concern_A = 
+           "Concerned.about.interaction.of.medicine.w.Rx_A",
+         Info.from.friends.family_B = "Get.info.on.different.medicine.from.family.and.friends_B") %>%
+  mutate(participant = seq_along(1:n())) %>%
+  selectd(participant, everything()) %>%
+  selectd(-ï..ID_NA)
+
+medicine_data %>%
+  select_at(vars(1:4)) %>%
+  head(10) %>%
+  custom_kable()
+```
+
+To get a sense of what answers each question received, I've visualized all the survey responses using a faceted bar chart. To get another layer, I also included the question type so each column can be grouped further. From this, the first consumer profile starts to emerge. For example in the attitudes group, it's clear the group is somewhat cost conscious with 1-2 and 3-4 dominating the question "Don't care about cost if it works". In the same question type, the group seems to be hampered by their medical symptoms with 1-2 being the largest answer for "symptoms don't slow me down" (as a note here, I'm assuming 1 is strong disagree and 6 is strong agree). 
+
+Structurally, I'm also interested in questions that seem to elicit a spread of answers. For example, the question asking about alternate medicine has almost uniform responses. In contrast, the needs question probing consumer stomach sensitivity has a clear spread between each answers. This is helpful because during the cluster analysis, I'll be looking for definitive features amongst groups and questions with essentially split responses aren't as helpful for this.
+
+```{r visualizing medical data, fig.height=7.5, fig.width=10.5}
+medicine_data %>%
+  gather(key = "question", value = "response_value", -participant) %>%
+  mutate(question_type = rep(unlist(unname(question_type)), 
+                             each = nrow(medicine_data))) %>%
+  selectd(participant, question_type, question, response_value) %>%
+  count(question_type, question, response_value) %>%
+  ggplot(aes(response_value, n, fill = question_type)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(facets = "question") +
+  labs(title = "Survery responses for medical data- plot provides insights on consumers looking to for various drug benefits",
+       subtitle = "Colouring for attitude, buying habit, lifestyle, or needs question",
+       x = NULL)
+```
+
+With this in mind, I've decided to reduce the initial set from 16 variables to 12. This should help keep the clustering slightly more manageable from a size perspective as well as reducing any "low information" questions. More importantly, there is a nice mix of questions from each of the question types so the clustering can be mapped to specific marketing needs. As a final methodological point, the lca algorithm does not accept factors or character variables so I've changed the answer categories into numeric values.
+
+####Reduced set paramaters
+
+- Attitudes: Cost, symptoms, interaction with Rx
+
+- Behaviours: Medicine first sight, lookout for newest, waging war
+
+- Lifestyle: Under stress and work life balance
+
+- Needs: Upset stomach, strong, long lasing, and fast acting
+
+```{r making final set}
+lca_set <- medicine_data %>%
+  selectd(-Carry.medicince.everywhere_B,
+          -Alcohol.interaction.concern_A,
+          -Info.from.friends.family_B,
+          -Interested.in.all.alternate.medicine_A) %>%
+  mutate_at(vars(-participant), function(x) case_when(
+    x == "1_to_2" ~ 1,
+    x == "3_to_4" ~ 2,
+    x == "5_to_6" ~ 3,
+    x == "No ans." ~ 4
+  )
+)
+```
+
+***
+
+###Cluster size selection and model split validation
+
+Moving into the technical details, I've split the data into a training and test set so the most appropriate LCA model can be verified using a hold out sample. This is done by using the class conditional probabilities from the training set to develop the test classes clusters and then, comparing the results for consistency. Here, I'll do a review of AIC, BIC, and class predictions to provide assurances that the model selection is stable and statistically sound. 
+
+```{r conducting train and test split}
+set.seed(1017)
+data_split <- sample(x = nrow(lca_set), size = nrow(medicine_data) * .7, replace = F)
+
+training <- lca_set %>%
+  slice(data_split)
+
+testing <- lca_set %>%
+  slice(-data_split)
+```
+
+Similar to most clustering methods, there's an approach to choosing the appropriate number of LCA classes. This involves looking at AIC and BIC, which provide a metric for relative model importance. For example, if only one LCA model was created, the AIC and BIC are not useful given both metrics are used for comparison; they are not absolute. Given this, I've created LCA models for two to seven classes. From there, I'll use AIC and BIC to judge which one is the most appropriate.
+
+To streamline this process, I've developed a helper function to collect the LCA model components I need for analysis. `lca_collect` runs the model for a given class size for both train and test while also saving AIC, BIC, and prediction class size. Since the modelling requires a formula, I've also put that together too. There isn't an outcome variable so the y is just a 1 (as in regressions with no predictors, one is used as a no-term stand in value).
+
+```{r lca function dev}
+lca_formula <- cbind(Constantly.under.stress_L, 
+                     Stuggle.with.work.life.balance_L,
+                     Symptoms.don.t.slow.me.down_A,
+                     Rx.interaction.concern_A,
+                     Lookout.for.newest.medicine_B,
+                     Waging.war.on.symptoms_B,
+                     Need.Fast.acting.medicine_N,
+                     Don.t.care.about.cost.if.works_A,
+                     Medicine.that.won.t.upset.stomach_N,
+                     Need.long.lasting.affect_N,
+                     Medicine.at.first.sign.of.symptoms_B,
+                     Need.strong.medicine_N) ~ 1
+
+lca_collect <- function(return, lca_formula, train, test, lca_n, seed){
+  set.seed(seed = seed)
+  train_lca <- poLCA(formula = lca_formula, data = train, nclass = lca_n,
+                         nrep = 10, tol = .001, verbose = FALSE)
+  
+  set.seed(seed = seed)
+  test_lca <- poLCA(formula = lca_formula, data = test, nclass = lca_n,
+                    nrep = 10, tol = .001, verbose = FALSE, probs.start = train_lca$probs)
+  
+  aic_bic <- data.frame(classes = lca_n,
+                    train_aic = round(train_lca$aic, 3),
+                    test_aic = round(test_lca$aic, 3),
+                    train_bic = round(train_lca$bic, 3),
+                    test_bic = round(test_lca$bic, 3))
+  
+  train_size <- train_lca$predclass
+  test_size <- test_lca$predclass
+  
+  if (return == "aic") {return(aic_bic)}
+  if (return == "class") {return(list(train = train_size, test = test_size))}
+  if (return != "aic" | return != "class") {
+    stop("Value specified is not part of function- Call either aic or class")}
+}
+```
+
+I'll start with the AIC and BIC collection. Each LCA model's AIC and BIC are gathered simultaneously using the helper function. I've developed models for 2 to 6 classes, which should be generous on the upper bound. Aside from the technical selection process, the segments have to be business friendly, which means limiting the number to something that is manageable. Additionally, the data set isn't that large so a smaller number makes sense here.
+
+The table below seems to show three classes as being appropriate. This is just intuition but, it seems like that's where the added information levels out (i.e. the elbow). I outlined that my intuition would be towards a lower class size given there are only six input variables, so three seems reasonable. From a stability standpoint, the train and test values progressing similarly is a good thing.
+
+```{r aic and bic collection}
+aic_compare <- map_df(2:6, function(x) lca_collect(return = "aic", 
+                                        lca_formula = lca_formula, 
+                                        train = training, 
+                                        test = testing, 
+                                        lca_n = x, 
+                                        seed = 1017))
+
+
+aic_compare %>%
+  custom_kable()
+```
+
+Verifying these with a visualization furthers this initial assessment. Both the training and test metrics show elbow breaks at 3 classes. This means that the added variance accounted for by the additional classes may not provide any extra value when weighed against the additional complexity. As such, I'll select a three class model going forward.
+
+```{r aic and bic visualization}
+aic_compare %>%
+  gather(key = "metric", value = "values", -classes) %>%
+  arrange(desc(metric)) %>%
+  mutate(metric = factor(metric, levels = c("train_aic", "train_bic",
+                                            "test_aic", "test_bic")),
+         set_marker = c(rep("train", 10), rep("test", 10)),
+         set_marker = factor(set_marker, levels = c("train", "test"))) %>%
+  ggplot(aes(classes, values, colour = metric)) +
+  geom_line(size = 1.7) +
+  facet_grid(facets = "set_marker", scales = "free_y") +
+  geom_vline(xintercept = 3, colour = "dodgerblue2", size = 1.3, alpha = .7) +
+  scale_x_continuous(breaks = seq(0, 10, 1)) +
+  labs(title = "Train and test set AIC/BIC metrics plot",
+       y = "AIC/BIC",
+       subtitle = "AIC & BIC lines show same elbow feature for class selection (blue line at 3)")
+```
+
+Before moving onto the final model selection though, I'm going to look at train and test class predictions for consistency. While AIC and BIC were similar in test and train, the actual class sizes highlight if there is stability between the model splits. This provides another check to see if the train and test split is reasonable. As the plot below highlights, the class sizes are generally consistent across train and test models. The models with 5 and 6 classes look almost non-linear but otherwise, the split looks reasonable. This provides further evidence that the train and test models are sound.
+
+```{r checking lca size stability, warning=FALSE, message=FALSE}
+lca_size <- sapply(2:6, function(x) lca_collect(return = "class", 
+                                                lca_formula = lca_formula, 
+                                                train = training, 
+                                                test = testing, 
+                                                lca_n = x, 
+                                                seed = 1017))
+
+comparison_df <- data.frame(
+  set = rep("train", nrow(training)),
+  CL2 = unlist(lca_size[1]),
+  CL3 = unlist(lca_size[3]),
+  CL4 = unlist(lca_size[5]),
+  CL5 = unlist(lca_size[7]),
+  CL6 = unlist(lca_size[9])
+  )
+
+comparison_df <- comparison_df %>%
+  bind_rows(
+    data.frame(
+      set = rep("test", nrow(testing)),
+      CL2 = unlist(lca_size[2]),
+      CL3 = unlist(lca_size[4]),
+      CL4 = unlist(lca_size[6]),
+      CL5 = unlist(lca_size[8]),
+      CL6 = unlist(lca_size[10])
+      )
+    )
+
+cluster_compare <- comparison_df %>%
+  gather(key = "cluster", value = "value", -set) %>%
+  group_by(set, cluster, value) %>%
+  count() %>%
+  mutate(count = n,
+         clust_percent = ifelse(set == "train", n / nrow(training), n / nrow(testing)),
+         clust_percent = round(clust_percent, 4) * 100) %>%
+  ungroup() %>%
+  selectd(-n, -value) %>%
+  arrange(set, cluster, count)
+
+values <- cluster_compare %>%
+  selectd(-count) %>%
+  mutate(row_id = 1:n()) %>%
+  ungroup() %>% 
+  spread(key = "set", value = "clust_percent") %>%
+  selectd(-row_id) %>%
+  filter(is.na(train) == F)
+
+cluster_compare %>%
+  selectd(-count) %>%
+  mutate(row_id = 1:n()) %>%
+  ungroup() %>% 
+  spread(key = "set", value = "clust_percent") %>%
+  selectd(-row_id) %>%
+  filter(is.na(train) == T) %>%
+  selectd(-train) %>%
+  bind_cols(values) %>%
+  selectd(cluster, train, test) %>%
+  mutate(cluster = factor(cluster, levels = names(comparison_df)[2:6])) %>%
+  ggplot(aes(train, test)) +
+  geom_point(aes(colour = cluster), size = 5, alpha = .5, show.legend = F) +
+  geom_smooth(method = "lm", size = 1.3, se = F, colour = "dodgerblue") +
+  facet_wrap(facets = "cluster", scales = "free") +
+  labs(title = "Train and test LCA class size percentage comparison",
+       subtitle = "Both sets show very similiar class size proportions providing evidence that test LCA probability split is sound",
+       x = "training group percentages",
+       y = "testing group percentages")
+```
+
+***
+
+###LCA model development: Customer segmentation in action
+
+Selecting the cluster size and validating the model is a long process but, it's essential for developing confidence in the analytical solution. Here, I'll switch gears and
+
+To begin the final model review, I'll develop a three class LCA object for both train and test. I'll use the training model as the main focus for the analysis but, will review the final test LCA for interpretation and stability as well.
+
+```{r LCA model development for 3 classes}
+set.seed(1017)
+train_lca <- poLCA(formula = lca_formula, data = training[,-1], nclass = 3,
+                       nrep = 10, tol = .001, verbose = FALSE)
+
+set.seed(1017)
+test_lca <- poLCA(formula = lca_formula, data = testing[,-1], nclass = 3,
+                  nrep = 10, tol = .001, verbose = FALSE, probs.start = train_lca$probs)
+```
+
+The main focus here will be the inclusion probabilities for each variable level by class. These represent conditional probabilities of being assigned to a specific class based on the variable level. For example, if a customer has level 5 for occupation with a conditional probability of 85% for a specific class, it's possible that group has customers in management positions. These probabilities really separate LCA from clustering given it introduces a statistical element to the analysis. 
+
+With this in mind, below are the variable and class probabilities for the three LCA model. While the table is slightly busy, it's the first chance to assess which variable levels exemplify a certain class. 
+
+```{r four class LCA probability review}
+t(as.data.frame(train_lca$probs)) %>% 
+  custom_kable()
+```
+
+Since the table is long, I've developed a faceted plot with all the classes, variables, and corresponding probabilities. I found this very helpful for getting a feel for what kind of participant was assigned to each class. Overall, I think the classes here are fairly heterogeneous, which allows for clear interpretation with defining features. There are a lot of variables to go over, so I've included a condensed series of insights for each class:
+
+#####Class 1
+
+- High probabilities for high strength answers (5-6)
+- Highest probability for looking out for new medicine
+- Exception here is high probability of low strength answer for symptoms not slowing down participant
+
+#####Class 2
+
+- High probabilities for medium strength answers (3-4)
+- Highest probability for any class on not worrying about cost
+
+#####Class 3
+
+- High probabilities for low strength answers (1-2)
+
+What this means is that there are essentially three groups capturing each band of responses for each answer. Moving forward, these groups should be useful for various marketing activities.
+
+```{r four class LCA probability visualization, fig.width=10.5, fig.height=8}
+as.data.frame(train_lca$probs) %>%
+  rownames_to_column(var = "class") %>%
+  gather(key = "variable", value = "probs", -class) %>%
+  arrange(class, variable) %>%
+  mutate(var_level = as.numeric(str_extract(variable, "[[:digit:]]+")),
+         class = gsub(pattern = "\\:", replacement = "", x = class),
+         variable = gsub(pattern = "\\.", replacement = "", x = variable),
+         variable = gsub(pattern = "Pr.*", replacement = "", x = variable),
+         probs = round(probs, 2)) %>%
+  ggplot(aes(variable, var_level, size = probs, colour = probs)) +
+  geom_point() +
+  facet_wrap(facets = "class", nrow = 1) + 
+  coord_flip() +
+  theme_bw() +
+  scale_colour_gradient(low = "deepskyblue", high = "darkorange") +
+  guides(size = F) +
+    labs(title = "Class probability comparison plot for LCA model with three classes",
+         x = NULL,
+         y = "variable level")
+```
+
+By this point, I'm confident with the stability but, to add a final review, I'll take a look at class population shares. These are derived from taking the means of the posterior probabilities columns from the model. As seen below, both training and test are close, though not identical, which adds the final stability checkmark. 
+
+```{r}
+c(train_class_ = sort(colMeans(train_lca$posterior)),
+  test_class_ = sort(colMeans(test_lca$posterior))) %>%
+  custom_kable()
+```
+
+***
+
+###Alternative Approach: K-Modes for customer segmentation
+
+While lca offered clear cut differentiation between groups, I also wanted to develop a k-modes solution to compare the methods. While I like the lca output, I was hoping for nuance than a low, medium, high grouping. As such, I'll quickly do a k-modes solution and see if it offers anything different.
+
+To this end, I've started by reviewing how many clusters might be appropriate. The MAF plot highlights three given the elbow break at that value.
+
+```{r kmodes, echo=FALSE}
+kmodes=function (data = data, nclust = nclust, niterations = niterations, nloops = nloops, seed = seed) 
+{
+  prevMAF = -1
+  niterations = 25
+  set.seed(seed)
+  for (i in 1:nloops) {
+    z = fun.kmodes(data = data, nclust = nclust,niterations=niterations)
+    if (z$MAF > prevMAF) {
+      prevMAF = z$MAF
+      ind = i
+      z.old = z
+    }
+  }
+  return(list(data = z.old$Data, 
+              Group = z.old$Groups, Centroids = z.old$Centroids,  
+              Cluster.Sizes= z.old$Cluster.Sizes,
+              MAF = z.old$MAF, iteration = ind, 
+              seed = seed))
+}
+
+fun.kmodes=function (data = data, nclust = nclust,niterations=niterations) 
+{
+  data=as.data.frame(data)
+  nam=names(data)
+  data=apply(data,2,factor)
+  M = nrow(data)
+  N = ncol(data)
+  K = nclust
+  S = sample(1:K,M,replace=TRUE)
+  W = matrix("NA", K, N)
+  datahat=matrix("NA",M,N)
+  i = 1
+  while ((i <= niterations)) {
+    for(j in 1:N) {
+      W[,j]=tapply(data[,j],S,fun.mod)
+    }
+    
+    hst= 0
+    #               print(W)
+    for(j in 1:M) {
+      tmp=rep(0,K)
+      for (k in 1:K){
+        
+        ttt = (data[j,])==(W[k,])
+        tmp[k]= length(ttt[ttt==TRUE])		
+        
+      }	
+      l = seq(1:K)[tmp==max(tmp)]
+      if(length(l) == 1) S[j]=l 
+      if(length(l) > 1) S[j] = sample(l,1)
+      datahat[j,] = W[S[j],]
+      hst=hst+max(tmp)
+    }	
+    #                print(c(i, hst))
+    
+    #			for(j in 1:M) {
+    #				for(n in 1:N) {
+    #				if(!is.na(data[j,n]) && (datahat[j,n] == data[j,n])) hst[i] = hst[i]+1
+    
+    i=i+1
+  }
+  W=data.frame(W)
+  names(W) = nam
+  W = W[sort(unique(S)),]
+  if(nrow(W) >1) {row.names(W) = sort(unique(S))}    
+  rrr = list(Groups = S, Cluster.Sizes = table(S), Centroids = W, MAF = hst/(M*N))
+  
+  
+  return(rrr)
+}
+
+fun.mod=function(x){
+  
+  y=factor(x)
+  z=table(y)
+  zz=z[z==max(z)]
+  n=names(zz)
+  if(length(n) > 1) n=sample(n,1)
+  return(n)
+  
+}
+```
+
+```{r kmodes size review, cache=TRUE}
+kmode_maf <- map(2:6, function(x) kmodes(data = training[,-1], 
+                                    nclust = x, 
+                                    niterations = 5, 
+                                    nloops = 100, 
+                                    seed = 1017)$MAF)
+
+as.data.frame(kmode_maf) %>%
+  gather(key = "kmode_size", value = "MAF") %>%
+  mutate(kmode_size = 2:6) %>%
+  ggplot(aes(kmode_size, MAF)) +
+  geom_line(size = 1.3, colour = "dodgerblue2") +
+  geom_vline(xintercept = 3, size = 1.3, colour = "darkorange", alpha = .5) +
+  labs(title = "Picking three kmodes clusters seems appropriate given elbow location")
+```
+
+Using the same training set, I developed a three clusters kmodes model. As seen, the solution is fairly similar despite using a different method. With this in mind, I'll stick with the lca approach.
+
+```{r three kmodes review, cache=TRUE}
+three_kmodes <- kmodes(data = training[,-1], 
+                       nclust = 3, 
+                       niterations = 5, 
+                       nloops = 100, 
+                       seed = 1017)
+
+t(three_kmodes$Centroids) %>%
+  as.data.frame() %>%
+  custom_kable()
+```
+
+***
+
+###Segment profiling focus: Extracting business value from the lca model
+
+I've picked the three class lca model but, still haven't formally reviewed the clusters for size and naming. Here, I'll switch focus and move from technical to business oriented as I review the final lca groups.
+
+As I highlighted earlier, each class essentially became a group of participants with low, medium, and high strength responses for each question. Given this, I've devised segment names to reflect this finding.
+
+```{r final class naming and size review}
+data.frame(
+  class = c(1:3),
+  class_name = c("Demanding & high needs users",
+                 "Steady, middle ground users",
+                 "Easy going, low needs users"),
+  class_size = as.vector(table(train_lca$predclass)),
+  class_proportion = round(as.vector(prop.table(table(train_lca$predclass))), 2)
+  ) %>%
+  custom_kable()
+```
+
+###Putting segments to work: Developing marketing activities for product categories
+
+####Activities focus
+
+With the segments developed, I'll work towards establishing how these new groups might be purposed. This includes touching on different activities and product categories these new segments would be useful for.
+
+Given the survey data, I think the results could be used for personalized marketing activities with an emphasis on pricing specials and promotions, new product launches, and general sales targeting. Starting generally, with these segments identified, a company could do more targeted, personalized outreach. While the content itself wouldn't be explicitly designed for a consumer, the firm could at least be more certain they belonged to a specific segment. For example, the company here might be a drug store wanting to send a weekly product flyer of different medicine categories to a consumer. One could be developed for a specific cluster focusing on products that might fit their needs, such as fast acting, high pain relief items for cluster 1. In the same vein, if a company was unveiling a new product, these segments could be used for early product awareness and promotion. While these are fairly broad, both would be good activities for actioning the analytics solution.
+
+At the more tactical level, the segments could be used to set up pricing promotions for consumers. Specifically, clusters 1 (high needs users) and 3 (low needs users) would be good for setting up sales for targeted digital marketing activities. Here, I envision the segments as being useful for setting up an experiment by contacting these groups with a coupon for a specific medical category and seeing which consumers respond. This would include a more rigorous experimental design, including sending to participants outside of the group so to designate a control group to compare results with, but the testing concept could be enabled using the segments. Further, this might help validate whether the profiles developed during the LCA exercises are accurate. For example, if a pricing promotion was offered to the high needs group at a very low price and a very few people responded, it might signal wider issues with the segmentation. Of course this would require baselines and other controls but, the idea stands in principle.
+
+I also considered the use of conjoint analysis for new product design using this data but, I don't think it's appropriate given the questions are all asked independently. There seems to be enough product features to get  a general sense of what a consumer segment might want but, none of them have been presented as fully developed product ideas. Overall, I think these methodological shortcomings make this set inappropriate for conjoint analysis even though there are product-centric questions.
+
+####Categories focus
+
+Since the survey data has a broad medicine focus, there are several product categories the segments could be used for. I mentioned in the previous section a fabricated example with a drug store. At a more macro level, segments like this could be used for a chain pharmacy or drug store to target a broad array of medicinal or wellness consumers. I touched on fine tuning general marketing with these segments which would be feasible for a firm in the general health and wellness category.
+
+With more granularity, these segments could be used to target consumers in the pharmaceutical, personal health, and health and wellness categories. Since the medicine data doesn't seem to have a product label attached to it, I'm assuming the questions are broad based. I've included a high level breakdown for each below:
+
+> Pharmaceutical Drugs: The questions focus squarely on a consumers drug preferences so pharma is a big opportunity here. Drugs in the pain relief category seem like a natural fit here but, I think a broad based class of prescriptions drugs would be suitable as well given the questions ask for broad responses (such as waging war on symptoms).
+
+> Over-the-counter Drugs: Products like Tyelonol, aspirin, and other pain relief drugs seem like a good product cateogry for these segments. That said, I outlined above that the questions are broad enough to include any medicine so this would expand to any readily available, non-prescription drug. For example, heart burn or medicine for an upset stomach would be suitable as well.
+
+> Topical Rubs & Creams: Outside of pills and traditional oral medicines, the segments could be used for more modern topical products. These could include pain relief (like gel for back aches) or skin care products (to treat health issues like eczema).
+
+> Vitamins & Supplements: Again with broad based questions, the segments might be used for vitamins and supplements aimed at symptom relief, stress reduction, and general wellness promotion. 
+
+> All Natural Medicine: As a newer product categeory, natural, non-pharmaceutical products might be an option here. One of the questions specifically asks about looking out for the newest medicine so using the segments to market all natural products seems reasonable. Products like CBD (Cannabidiol)  might be used to treat various ailments and, are a brand new, legal category in some countries (like Canada). These segments might be used to market to customers as the category is launched.
+
+***
+
+###Expanding the analysis: Building a more comprehensive segmentation for All Natural Medicine
+
+I alluded to this above but, marijuana was legalized this week in Canada (October 17). With this, there is an entire industry be launched that is looking to attract new consumers. As a result, there is an abundance of marketing work being done by companies in the newly minted industry. Since one of the express purposes of marijuana usage is medicinal benefits, I'll focus on expanding the existing segments to focus on the new All Natural category.
+
+Before the segmentation approach, I'll critique the current data. The one feature I would like to see more is a focus on spending. Right now, the survey asks about price sensitivity but, doesn't include a question on weekly or monthly spending habits. These would be useful for seeing who might be profitable consumer. Further, this data could be used to get a sense of price sensitivities a consumer might have. Since this is a new product category, setting appropriate prices is essential and these survey responses would help.
+
+Outside of the dollar value in spending, there isn't any insight on product purchase frequency either. I would include both of these for my bolstered segmentation efforts. Otherwise, the data seems sufficient and can be enhanced with new questions pertaining to cannabis use for medicinal purposes.
+
+####Spending questions
+
+> I purchase medical products to alleviate my symptoms: everyday, once a week, several times a month, once a month, less than once a month
+
+> Select the categroy that describes your monthly spending pattern on medicinal products: less than 20$, between 20 and 50 dollars, 50 to 100 dollars, 100 to 150 dollars, 150 to 200 dollars, and over 200 dollars.
+
+> If more than 200$, provide a general spending number 
+
+####Attitude questions
+
+Cannabis use, in any form, is a contested social issue. Many people, on moral or principled grounds, have a negative view of the product. In the same vein, some consumers likely feel it's either risky or not right for them. To ascertain a person's views on these issues, my survey would include attitude questions looking to parse these preferences. As a methodological note, all the scales would be the same as the initial survey (1-2, 3-4, and 5-6).
+
+> I approve of the recent cannabis legalization
+
+> I am unsure if cannabis use if safe in any form
+
+> I am open minded to using a cannabis product to treat a medical issue
+
+####Behavioural questions
+
+For behavioural questions, I'd like to garner responses on previous cannabis use, in any form. The idea is not just people who have used it but, who also have used products with a health-centric focus.
+
+> I have used cannabis recreationally in the past year (Yes or No)
+
+> I have used cannabis products to help manage a medical condition
+
+
+####Lifestyle questions
+
+Generally, cannabis products are aimed at health improvements for pain relief, anxiety, sleep issues, and symptom control (like nausea). I'm satisfied with the lifestyle questions here but, would also include a few more targeted options for types of symptoms:
+
+> I have issues with getting a good nights sleep
+
+> My medical symptoms keep me from sleeping well
+
+> I have trouble being is large groups without feeling uncomfortable
+
+####Needs questions
+
+This is the section I am most satisfied with. The needs questions are pointedly aimed at general medical conditions so I think they add a lot to the segmentation effort. I would keep these results moving forward.
+
+####Demographics
+
+The survey lacks any demographic features making it hard to define who the consumers are. Additionally, since the cannabis market is nascent and there is likely little consumer profiling available, I would want some basic personal traits included here.
+
+> Asking for: Age, geneder, income, educational attainment, postal code
+
+Overall, I've included a good sampling of questions that would be useful for expanding the segments. From a design standpoint, I'd be cautious not to include too many questions so respondents weren't inclined to avoid taking the survey. Here, I would start with this list and pare it down if necessary. That said, I think this would be a good start for gathering data to perform an expanded market segmentation for the All Natural Medicine category with a focus on cannabis.
+
+***
+
+###Developing variable weighting: Combining analytics and business accumen
+
+A variable weighting scheme here could be done using a mix of quantitative methods and business acumen. If I were leading a meeting where I was reviewing the newly formed segments with a product category group, I would come with some analytical work to start the weighting process. These could be derived by developing models with the segments as the outcome variable and then assessing coefficients or variable importance metrics (for tree or random forest methods). Without being overly technical, these might be useful for framing which variable might be important for the segments.
+
+That said, I think this process should inherently be more business focused. The initial model outputs might help but, it would be essential to defer to the business and ensure any work met their approval.
+
+With this in mind, I would review the strategic and marketing plans for the company to best understand what business goals were important. This framing could then be used to review the product category and see how the area fit into the wider company direction. Finally, I would consult with the position with profit and loss responsibilities for the category, like the product or brand manager, and get their input. Given this position has the category authority, it would be imperative to have their support and guidance on developing a variable weighting scheme. Overall, I think this approach still uses a modern analytical style to develop weights but, ensures there is a driving business rationale for any weighting scheme.
+
+
+***
