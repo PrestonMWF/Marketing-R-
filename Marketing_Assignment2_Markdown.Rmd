@@ -37,19 +37,19 @@ custom_kable <- function(x){
 fashion <- read.table("fashiondata.txt", sep = "", stringsAsFactors = F) %>%
   rename_all(tolower) %>%
   mutate(respondent = rep(1:400, each = 8)) %>%
+  mutate_at(vars(fashion, quality, price), as.factor) %>%
   select(respondent, everything())
 ```
 
 ***
 
-###Exploratory Data Analysis: Reviewing consumers and their fashion preferences
+###Exploratory Data Analysis: Reviewing consumer fashion preferences
 
 Before the modelling phase, I'll do an exploratory analysis to review the data I'm working with. As a starting point here, I'm doing a quick summary. It looks like the various attributes are balanced for price, quality, and fashion while the ratings are also fairly uniform. The data contains more women than men and also skews younger with the 16-24 age group as the largest.
 
 ```{r data summary}
 fashion %>%
   select(-respondent) %>%
-  mutate_all(as.factor) %>%
   summary() %>%
   custom_kable()
 ```
@@ -143,7 +143,6 @@ fashion %>%
   custom_kable()
 ```
 
-
 ***
 
 ###Conjoint in Action: Reviewing and quantifying consumer preferences
@@ -161,49 +160,70 @@ In this section, I'll develop analyses using the following methods:
 Before getting to the modelling though, there are several data frames that need to be constructed. These include all the consumers preferences spread out in a matrix, all ratings in a single column, the variable levels, and the factorial design.
 
 ```{r partworth set up}
-preference_matrix <- matrix(nrow = 400, ncol = 8, data = fashion$rating) %>%
+profiles <- c(seq(4, nrow(fashion), 8), seq(8, nrow(fashion), 8)) %>%
+  as.data.frame() %>%
+  rename(holdout = ".") %>%
+  arrange(holdout)
+
+mcmc_train <- fashion %>%
+  select(respondent, rating, fashion, quality, price) %>%
+  model.matrix(~., data = .) %>%
+  as.data.frame() %>%
+  select(-1) %>%
+  filter(!row_number() %in% profiles$holdout) %>%
+  mutate_all(function(x) ifelse(x == 0, -1, x))
+
+mcmc_test <- fashion %>%
+  select(respondent, rating, fashion, quality, price) %>%
+  model.matrix(~., data = .) %>%
+  as.data.frame() %>%
+  select(-1) %>%
+  filter(row_number() %in% profiles$holdout) %>%
+  mutate_all(function(x) ifelse(x == 0, -1, x))
+
+preference_training <- matrix(nrow = 400, 
+                              ncol = 8, 
+                              data = fashion$rating, 
+                              byrow = T) %>%
   as.data.frame()
-
-total_preferencs <- fashion %>%
-  select(rating)
-
-variable_levels <- fashion %>%
-  select(fashion, quality, price) %>%
-  gather(value = "levels") %>%
-  filter(duplicated(levels) == F) %>%
-  select(-key)
 
 factorial_designs <- gen.factorial(levels = c(2, 2, 2), 
                                    nVars = 3, 
                                    varNames = c("fashion", "quality", "price")) %>%
   mutate_all(as.factor)
 
-design_model <- model.matrix(~., data = factorial_designs)
+design_model <- model.matrix(~fashion + quality + price, data = factorial_designs) %>%
+  as.data.frame()
 ```
 
 ####Individual Partworth Analysis
 
 The first model will develop individual coefficients, called partworths, for each design variable. These values indicate which feature the consumer liked most or least. Taken together, an overall feature importance value can be derived for the respondent.
 
-I've develop a model for every respondent while also creating one for the first person. The individual summary shows the coefficient values with the respective p-values. Here, it appears consumer one has price as the least important variable given the significant negative coefficient. This analysis could be done for each person.
+#reform this- it's per concept regression on respondent_one not each person (row v col)
+
+I've developed a model for every respondent while also creating one for the first person. The individual summary shows the coefficient values with the respective p-values. Here, it appears consumer one has quality as the most important variable given the significant negative coefficient. This analysis could be done for each person.
 
 ```{r individual partworths}
-individual_partworth <- lm(t(preference_matrix) ~ design_model)
+holdout_profiles <- c(4, 8)
 
-respondent_one_part <- lm(t(preference_matrix[1,]) ~ design_model)
+individual_partworth <- lm(t(preference_training)[-holdout_profiles,] ~., 
+                           data = design_model[-holdout_profiles, -1])
 
-summary(respondent_one_part)
+concept_one_part <- lm(t(preference_training[1,]) ~., data = design_model)
+
+summary(concept_one_part)
 ```
 
-To continue the importance focus, I've put together a data frame of the coefficients for every respondent. Since the second set of coefficients is absent, I've also added them in here as well. Given these features all have two levels, the second coefficients are just the opposite of the first. Using these, an overall importance metric for variable can be derived. I've included a histograms of for each variable importance metric below. It appears fashion has the largest concetration towards zero while importance has the highest mode.
+To continue the importance focus, I've put together a data frame of the coefficients for every respondent. Since the second set of coefficients is absent, I've also added them in here as well. Given these features all have two levels, the second coefficients are just the opposite of the first. Using these, an overall importance metric for variable can be derived. I've included a histogram for each variable importance metric below. It appears quality has the largest concetration towards zero while price importance has the most dense output. This could signal it has the highest importance.
 
 ```{r individual partworth importance- getting high & low}
 partworth_analysis <- t(individual_partworth$coefficients) %>% 
   as.data.frame() %>%
   select(-1:-2) %>%
-  rename(fashion_1 = design_modelfashion1,
-         quality_1 = design_modelquality1,
-         price_1 = design_modelprice1) %>%
+  rename(fashion_1 = "design_model[-c(4, 8), ]fashion1",
+         quality_1 = "design_model[-c(4, 8), ]quality1",
+         price_1 = "design_model[-c(4, 8), ]price1") %>%
   mutate(fashion_2 = fashion_1 * -1,
          quality_2 = quality_1 * -1,
          price_2 = price_1 * -1,
@@ -228,7 +248,7 @@ partworth_analysis %>%
   facet_wrap(facets = "variable") +
   scale_x_continuous(breaks = seq(0, 1, .2)) +
   labs(title = "Normalized individual partworth importance coefficients",
-       subtitle = "Fashion seems to have highest concentration towards zero")
+       subtitle = "Quality seems to have highest concentration towards zero")
 ```
 
 In the previous plot, a lot gets obfuscated in terms of how these importance variables rank person-to-person. To better evaluate how each scored, I've plotted their ranks here. Doing this shows that quality actually does have the highest number of first place ranks while fashion has the most last place ranks. Price seems to be a much more neutral importance variable using this method.
@@ -244,31 +264,380 @@ partworth_analysis %>%
   ggplot(aes(rank, n, fill = variable)) +
   geom_col(show.legend = F) +
   facet_wrap(facets = "variable") +
-  labs(title = "Variable importance ranks for each metric- Quality has most first place ranks",
+  labs(title = "Variable importance ranks for each metric- Price has most first place ranks",
        subtitle = "Rank values of 1.5 and 2.5 indicate ties for first and second respectively",
        y = NULL)
 ```
 
-As a final check for this modelling approach, I want to check the R squared. This can be derived using the squared correlation between the fitted and actual values. With a value of .634, the metric is fairly strong. I'll use this for comparison moving forward to other methods.
+As a final check for this modelling approach, I want to check the R squared. This can be derived using the squared correlation between the fitted and actual values. With a value of .779, the metric is strong. I'll use this for comparison moving forward to other methods.
 
 ```{r individual partworth model fit}
-preference_matrix %>%
-  mutate(respondent = 1:400) %>%
-  gather(key = "var", value = "actual", - respondent) %>%
-  arrange(respondent) %>%
-  mutate(fitted = as.vector(individual_partworth$fitted.values)) %>%
-  select(actual, fitted) %>%
-  summarise(model_R2 = round(cor(fitted, actual) ^ 2, 3)) %>%
+model_rsquared <- mcmc_train %>%
+  mutate(individual = as.vector(individual_partworth$fitted.values)) %>%
+  select(rating, individual)
+
+model_rsquared %>%
+  summarise(model_R2 = round(cor(individual, rating) ^ 2, 3)) %>%
   kable(align = "left", format = "html") %>%
   kable_styling(bootstrap_options = "striped")
 ```
 
 ####Aggregated Individual Partworth Analysis
 
+The aggregate approach simply takes the partworth importance values from the first model and averages the coefficients. Following this, the average rankings can be taken to ascertain which variable is the most impactful for the design.
+
+In addition to the importance metric, the personal coefficient averages can be taken as well. This is essentially another way of looking at the importance metric but, each cofficient level can be seen here. A table of the values can be seen below, which shows price as the most impactful design feature.
+
+```{r aggreagted partworth coefficients table}
+partworth_analysis %>%
+  select(-price_importance, -fashion_importance, -quality_importance) %>%
+  gather(key = "level") %>%
+  arrange(level) %>%
+  mutate(variable = rep(names(fashion[c(3, 5, 4)]), each = 800)) %>%
+  group_by(variable, level) %>%
+  summarise(importance_mean = mean(value)) %>%
+  custom_kable()
+```
+
+Further confirming the table above, the aggregated variable importance plot shows
+
+```{r partworth aggregate plot}
+partworth_analysis %>%
+  select(price_importance, fashion_importance, quality_importance) %>%
+  gather(key = "variable") %>%
+  group_by(variable) %>%
+  summarise(importance_mean = mean(value) * 100) %>%
+  mutate(variable = reorder(variable, importance_mean)) %>%
+  ggplot(aes(variable, importance_mean, fill = variable)) +
+  geom_col(show.legend = F) +
+  coord_flip() +
+  labs(title = "Aggregate partworth importance- Price has largest mean value",
+       x = NULL)
+```
+
+To conclude this section, I'll also develop the linear model for the fashion data with rating as the outcome and the three design variables as predictors. This returns the same model as found through the `Conjoint` function but, the output is cleaner and less verbose. Overall, it appears all three are highly significant given the low p-values. Both coefficients for fashion and quality show positive associations with increased ratings while price shows negative (i.e. lower prices for higher ratings). Notably, the R squared here is .37, a large decrease from the estimated metric derived from the individual partworth fitted values and actuals.
+
+```{r fashion linear model}
+fashion_lm <- lm(rating ~ fashionTraditional + `qualityLow Qual` + priceLowPrice, 
+                 data = mcmc_train)
+
+summary(fashion_lm)
+```
+
+####Linear Mixed Model Partworth Analysis
+
+
+```{r developing linear mixed model, warning=FALSE, message=FALSE}
+fashion_mixed <- lmer(rating ~ fashionTraditional + `qualityLow Qual` + priceLowPrice + 
+                        (1 + fashionTraditional + `qualityLow Qual` + priceLowPrice | respondent), 
+                      data = mcmc_train)
+```
+
+
+```{r reviewing fixed effects}
+data.frame(fixef(fashion_mixed)) %>%
+  rownames_to_column(var = "Variable") %>%
+  rename(Fixed_value = fixef.fashion_mixed.) %>%
+  custom_kable()
+```
+
+
+```{r linear mixed model R2}
+model_rsquared <- model_rsquared %>%
+  mutate(mixed = predict(fashion_mixed))
+
+model_rsquared %>%
+  summarise(model_R2 = round(cor(mixed, rating) ^ 2, 3)) %>%
+  kable(align = "left", format = "html") %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+####Markov Chain Monte Carlo (MCMC) Partworth Analysis
+
+
+```{r mcmc regression, warning=FALSE, message=FALSE, cache=TRUE}
+library(MCMCpack)
+
+fashion_mcmc <- MCMChregress(fixed = rating ~ fashionTraditional + 
+                               `qualityLow Qual` + 
+                               priceLowPrice, 
+                             random =  ~1 + fashionTraditional +
+                               `qualityLow Qual` + 
+                               priceLowPrice,
+                             r = 8,
+                             R = 8,
+                             data = mcmc_train, 
+                             group = "respondent", 
+                             verbose = 0)
+```
+
+
+
+```{r mcmc R2 and final compares}
+model_rsquared <- model_rsquared %>%
+  mutate(mcmc = fashion_mcmc$Y.pred)
+
+model_rsquared %>%
+  summarise(individual_R2 = round(cor(individual, rating) ^ 2, 3),
+            mixed_R2 = round(cor(mixed, rating) ^ 2, 3),
+            mcmc_R2 = round(cor(mcmc, rating) ^ 2, 3)) %>%
+  custom_kable()
+```
+
+####Assess the performance of the individual, mixed effects, and mcmc model using holdout
+
+
+```{r mcmc test development}
+mcmc_coef <- fashion_mcmc$mcmc %>%
+  as.data.frame() %>%
+  gather(key = "variable", value = "coef") %>%
+  mutate(variable = str_replace(string = variable, pattern = "[\\(\\)]", 
+                                replacement = ""))
+
+intercept_find <- grepl(pattern = "b.Intercept", x = mcmc_coef$variable)
+
+quality_find <- grepl(pattern = "b.`qualityLow Qual`", x = mcmc_coef$variable)
+
+fashion_find <- grepl(pattern = "b.fashionTraditional", x = mcmc_coef$variable)
+
+price_find <- grepl(pattern = "b.priceLowPrice", x = mcmc_coef$variable)
+
+mcmc_coef <- mcmc_coef %>%
+  mutate(name = case_when(
+   intercept_find ~ "Intercept",
+   quality_find ~ "qualityLow",
+   fashion_find ~ "fashionTrad",
+   price_find ~ "priceLow"
+  )
+) %>%
+  filter(!is.na(name))
+
+mcmc_rand_means <- mcmc_coef %>%
+  group_by(variable, name) %>%
+  summarise(rand_mean = mean(coef)) %>%
+  mutate(respondent = str_extract(string = variable, pattern = "[0-9]{1,3}"),
+         respondent = as.numeric(respondent)) %>%
+  spread(key = "name", value = "rand_mean")
+
+mcmc_rand_means <- data.frame(
+  respondent = unique(mcmc_rand_means$respondent),
+  fashionTrad = na.omit(mcmc_rand_means$fashionTrad),
+  Intercept = na.omit(mcmc_rand_means$Intercept),
+  priceLow = na.omit(mcmc_rand_means$priceLow),
+  qualityLow = na.omit(mcmc_rand_means$qualityLow)
+)
+
+mcmc_coef <- fashion_mcmc$mcmc %>%
+  as.data.frame() %>%
+  dplyr::select(1:4) %>%
+  gather(key = "variable", value = "coef") %>%
+  group_by(variable) %>%
+  summarise(coef_means = mean(coef))
+
+mcmc_means <- data.frame(
+  respondent = unique(mcmc_rand_means$respondent),
+  fixedIntercept = mcmc_coef$coef_means[1],
+  Intercept = na.omit(mcmc_rand_means$Intercept),
+  fixedTrad = mcmc_coef$coef_means[3],
+  fashionTrad = na.omit(mcmc_rand_means$fashionTrad),
+  fixedPrice = mcmc_coef$coef_means[4],
+  priceLow = na.omit(mcmc_rand_means$priceLow),
+  fixedQual = mcmc_coef$coef_means[2],
+  qualityLow = na.omit(mcmc_rand_means$qualityLow)
+)
+
+mcmc_predict <- function(n, x1, x2, x3){
+  int <- (mcmc_means$fixedIntercept[n] + mcmc_rand_means$Intercept[n])
+  price <- (mcmc_means$fixedPrice[n] + mcmc_means$priceLow[n]) * x1
+  qual <- (mcmc_means$fixedQual[n] + mcmc_means$qualityLow[n]) * x2
+  fash <-  (mcmc_means$fixedTrad[n] + mcmc_means$fashionTrad[n]) * x3
+  yhat <- int + price + qual + fash
+  
+  return(yhat)
+}
+```
 
 
 
 
+```{r model prediction comparison, warning==FALSE}
+model_predictions <- data.frame(
+  actual = mcmc_test$rating,
+  individual = as.vector(predict(individual_partworth,
+                                 as.vector(design_model[holdout_profiles,]))),
+  mixed = predict(fashion_mixed, mcmc_test),
+  mcmc = mcmc_predict(n = mcmc_test$respondent, 
+                      x1 = mcmc_test$priceLowPrice,
+                      x2 = mcmc_test$`qualityLow Qual`,
+                      x3 = mcmc_test$fashionTraditional)
+)
+
+cor(model_predictions)[-1, 1] %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "set") %>%
+  rename(correlation = ".") %>%
+  arrange(desc(correlation)) %>%
+  custom_kable()
+```
+
+
+```{r clustering partworths}
+rand_partworths <- ranef(fashion_mixed)$respondent %>% 
+  as.data.frame()
+
+set.seed(1017)
+data_split <- sample(x = nrow(partworth_analysis), 
+                     size = nrow(partworth_analysis) * .7, 
+                     replace = F)
+
+training <- partworth_analysis %>%
+  slice(data_split) %>%
+  select(fashion_1, quality_1, price_1)
+
+testing <- partworth_analysis %>%
+  slice(-data_split) %>%
+  select(fashion_1, quality_1, price_1)
+
+cluster_collect <- function(return, training_data, test_data, cluster_n, n_start, seed){
+  set.seed(seed = seed)
+  train_cluster <- kmeans(training_data, centers = cluster_n, nstart = n_start)
+  test_cluster <- kmeans(test_data, centers = train_cluster$centers, nstart = n_start)
+  
+  vaf <- data.frame(cluster = cluster_n,
+             train_VAF = 1 - train_cluster$tot.withinss / train_cluster$totss,
+             test_VAF = 1 - test_cluster$tot.withinss / test_cluster$totss) %>%
+    mutate(total_diff = round(test_VAF - train_VAF, 3),
+           percent_diff = round(total_diff / train_VAF * 100, 3))
+  
+  train_size <- train_cluster$cluster
+  test_size <- test_cluster$cluster
+  
+  if (return == "vaf") {return(vaf)}
+  if (return == "test") {return(test_size)}
+  if (return == "train") {return(train_size)}
+  if (return != "vaf" | return != "test" | return != "train") {
+    stop("Value specified is not part of function- Call one of vaf, train, or test")}
+}
+
+vaf_compare <- map_df(2:10, function(x) cluster_collect(seed = 1017,
+                                             return = "vaf",
+                                             training_data = training, 
+                                             test_data = testing,
+                                             cluster_n = x, 
+                                             n_start = 100))
+
+vaf_compare %>%
+  select(-total_diff, -percent_diff) %>%
+  gather(key = data_set, value = vaf, train_VAF:test_VAF) %>%
+  mutate(data_set = factor(data_set, levels = c("train_VAF", "test_VAF"))) %>%
+  ggplot(aes(cluster, vaf, colour = data_set)) +
+  geom_line(size = 1.3) +
+  scale_y_continuous(breaks = seq(0, 1, .05)) +
+  scale_x_continuous(breaks = seq(2, 10, 1)) +
+  geom_vline(xintercept = 3, alpha = .3, colour = "blueviolet", size = 1.3) +
+  geom_vline(xintercept = 6, alpha = .3, colour = "blueviolet", size = 1.3) +
+  annotate("rect", xmin = 3, xmax = 6,
+           ymin = .47, ymax = .86, 
+           alpha = .1, fill = "blueviolet") +
+  scale_color_manual(values = c("royalblue2", "darkorange")) +
+  labs(title = "Variance Accounted For (VAF) Screeplot for training and test clusters",
+       subtitle = "Training and test remain close providing assurance that cluster groups are reasonable; Selecting 3 to 6 clusters seems appropriate",
+       y = "VAF")
+```
+
+
+
+```{r cluster visualization}
+comparison_df <- map(2:10, function(x) cluster_collect(seed = 1017,
+                                                       return = "train",
+                                                       training_data = training, 
+                                                       test_data = testing,
+                                                       cluster_n = x, 
+                                                       n_start = 100)) %>%
+  as.data.frame() %>%
+  rename_all(function(x) paste0("CL", rep(2:10, each = 1))) %>%
+  mutate(data_set = "training", 
+         F1_scores = princomp(training)$scores[,1],
+         F2_scores = princomp(training)$scores[,2]) %>%
+  select(data_set, F1_scores, F2_scores, everything())
+
+comparison_df <- comparison_df %>%
+  bind_rows(
+    map(2:10, function(x) cluster_collect(seed = 1017,
+                                          return = "test",
+                                          training_data = training, 
+                                          test_data = testing,
+                                          cluster_n = x, 
+                                          n_start = 100)) %>%
+  as.data.frame() %>%
+  rename_all(function(x) paste0("CL", rep(2:10, each = 1))) %>%
+  mutate(data_set = "testing", 
+         F1_scores = princomp(testing)$scores[,1],
+         F2_scores = princomp(testing)$scores[,2]) %>%
+  select(data_set, F1_scores, F2_scores, everything())
+)
+
+
+comparison_df %>%
+  head() %>%
+  custom_kable()
+```
+
+
+```{r clustering visualization}
+comparison_df %>%
+  gather(key = "cluster", value = "value", -data_set, -F1_scores, -F2_scores) %>%
+  mutate(data_set = factor(data_set, levels = c("training", "testing")), 
+         value = as.factor(value),
+         cluster = factor(cluster, levels = names(comparison_df)[4:12])) %>%
+  ggplot(aes(F1_scores, F2_scores, colour = value)) +
+  geom_jitter(alpha = .5) +
+  facet_grid(cluster ~ data_set, scales = "free") +
+  theme_bw() +
+  labs(title = "Train and test cluster groups visualized using PCA",
+       subtitle = "Both sets show very similiar group size and shape providing further evidence that test clustering split is sound",
+       x = "PCA 1",
+       y = "PCA 2")
+```
+
+
+```{r focused clustering vis}
+comparison_df %>%
+  gather(key = "cluster", value = "value", -data_set, -F1_scores, -F2_scores) %>%
+  mutate(data_set = factor(data_set, levels = c("training", "testing")),
+         value = as.factor(value)) %>%
+  filter(cluster == "CL4" | cluster == "CL5") %>%
+  ggplot(aes(F1_scores, F2_scores, colour = value)) +
+  geom_jitter(size = 2, alpha = .4) +
+  facet_grid(cluster ~ data_set, scales = "free") +
+  theme_bw() +
+  labs(title = "Train and test cluster groups visualized using PCA- Focus on Clusters 4 and 6",
+       subtitle = "Both sets show very similiar group size and shape providing further evidence that test clustering split is sound",
+       x = "PCA 1",
+       y = "PCA 2")
+```
+
+
+
+```{r reviewing cluster means}
+set.seed(1017)
+four_segments <- kmeans(training, centers = 4, nstart = 100)
+
+as.data.frame(four_segments$centers) %>%
+  mutate(Group = 1:4) %>%
+  select(Group, everything()) %>%
+  gather(key = "variable", value = "means", -Group) %>%
+  mutate(Group = as.factor(Group)) %>%
+  ggplot(aes(variable, means, fill = Group)) +
+  geom_col(show.legend = F) +
+  geom_hline(yintercept = 0, size = 1.3, alpha = .5, colour = "darkgray") +
+  facet_wrap(facets = "Group", nrow = 1) +
+  scale_y_continuous(breaks = seq(-2, 2, .5)) +
+  labs(title = "Faceted lines plot for variable means by group for six cluster k-means model",
+   subtitle = "Plot highlights variable means by cluster group; For example, group 6 has largest mean Age signalling older customer segment",
+   y = "group means",
+   x = NULL)
+```
 
 
 
