@@ -38,7 +38,7 @@ fashion <- read.table("fashiondata.txt", sep = "", stringsAsFactors = F) %>%
   rename_all(tolower) %>%
   mutate(respondent = rep(1:400, each = 8)) %>%
   mutate_at(vars(fashion, quality, price), as.factor) %>%
-  select(respondent, everything())
+  dplyr::select(respondent, everything())
 ```
 
 ***
@@ -49,7 +49,7 @@ Before the modelling phase, I'll do an exploratory analysis to review the data I
 
 ```{r data summary}
 fashion %>%
-  select(-respondent) %>%
+  dplyr::select(-respondent) %>%
   summary() %>%
   custom_kable()
 ```
@@ -122,7 +122,7 @@ quality <- fashion %>%
        x = NULL,
        y = NULL)
 
-grid.arrange(price, fashion_panel, quality, nrow = 1)
+grid.arrange(price, fashion_panel, quality, nrow = 1, widths = c(2, 2, 3))
 ```
 
 As another interest point, I wanted to see a top 10 for all the variables at once. The most populous design choice is young women who dislike low quality traditional clothing with a high price. For males, the largest count is for young men who have a high rating for modern, high quality, and low price fashion choices.
@@ -166,18 +166,18 @@ profiles <- c(seq(4, nrow(fashion), 8), seq(8, nrow(fashion), 8)) %>%
   arrange(holdout)
 
 mcmc_train <- fashion %>%
-  select(respondent, rating, fashion, quality, price) %>%
+  dplyr::select(respondent, rating, fashion, quality, price) %>%
   model.matrix(~., data = .) %>%
   as.data.frame() %>%
-  select(-1) %>%
+  dplyr::select(-1) %>%
   filter(!row_number() %in% profiles$holdout) %>%
   mutate_all(function(x) ifelse(x == 0, -1, x))
 
 mcmc_test <- fashion %>%
-  select(respondent, rating, fashion, quality, price) %>%
+  dplyr::select(respondent, rating, fashion, quality, price) %>%
   model.matrix(~., data = .) %>%
   as.data.frame() %>%
-  select(-1) %>%
+  dplyr::select(-1) %>%
   filter(row_number() %in% profiles$holdout) %>%
   mutate_all(function(x) ifelse(x == 0, -1, x))
 
@@ -202,7 +202,7 @@ The first model will develop individual coefficients, called partworths, for eac
 
 #reform this- it's per concept regression on respondent_one not each person (row v col)
 
-I've developed a model for every respondent while also creating one for the first person. The individual summary shows the coefficient values with the respective p-values. Here, it appears consumer one has quality as the most important variable given the significant negative coefficient. This analysis could be done for each person.
+I've developed a model for every respondent while also creating one for the first profile. The individual profile summary shows the coefficient values with the respective p-values. Here, it appears profile one has quality as the most important variable given the significant negative coefficient. This analysis could be done for each profile along with every consumer too.
 
 ```{r individual partworths}
 holdout_profiles <- c(4, 8)
@@ -220,19 +220,16 @@ To continue the importance focus, I've put together a data frame of the coeffici
 ```{r individual partworth importance- getting high & low}
 partworth_analysis <- t(individual_partworth$coefficients) %>% 
   as.data.frame() %>%
-  select(-1:-2) %>%
-  rename(fashion_1 = "design_model[-c(4, 8), ]fashion1",
-         quality_1 = "design_model[-c(4, 8), ]quality1",
-         price_1 = "design_model[-c(4, 8), ]price1") %>%
-  mutate(fashion_2 = fashion_1 * -1,
-         quality_2 = quality_1 * -1,
-         price_2 = price_1 * -1,
-         fashion_importance = abs(fashion_1) + abs(fashion_2),
-         quality_importance = abs(quality_1) + abs(quality_2),
-         price_importance = abs(price_1) + abs(price_2))
+  dplyr::select(-1) %>%
+  mutate(fashion2 = fashion1 * -1,
+         quality2 = quality1 * -1,
+         price2 = price1 * -1,
+         fashion_importance = abs(fashion1) + abs(fashion2),
+         quality_importance = abs(quality1) + abs(quality2),
+         price_importance = abs(price1) + abs(price2))
 
 partworth_sum <- partworth_analysis %>%
-  select(fashion_importance, quality_importance, price_importance) %>%
+  dplyr::select(fashion_importance, quality_importance, price_importance) %>%
   rowSums()
 
 partworth_analysis <- partworth_analysis %>%
@@ -241,7 +238,7 @@ partworth_analysis <- partworth_analysis %>%
                 quality_importance), function(x) x / partworth_sum)
 
 partworth_analysis %>%
-  select(fashion_importance, quality_importance, price_importance) %>%
+  dplyr::select(fashion_importance, quality_importance, price_importance) %>%
   gather(key = "variable", value = "coefficient") %>%
   ggplot(aes(coefficient, fill = variable)) +
   geom_histogram(bins = 10, show.legend = F) +
@@ -255,7 +252,7 @@ In the previous plot, a lot gets obfuscated in terms of how these importance var
 
 ```{r imporance ranking}
 partworth_analysis %>%
-  select(fashion_importance, price_importance, quality_importance) %>%
+  dplyr::select(fashion_importance, price_importance, quality_importance) %>%
   apply(., 1, function(x) rank(- x)) %>%
   t() %>%
   as.data.frame() %>%
@@ -269,12 +266,12 @@ partworth_analysis %>%
        y = NULL)
 ```
 
-As a final check for this modelling approach, I want to check the R squared. This can be derived using the squared correlation between the fitted and actual values. With a value of .779, the metric is strong. I'll use this for comparison moving forward to other methods.
+As a final check for this modelling approach, I want to check the R squared. This can be derived using the squared correlation between the fitted and actual values. With a value of .818, the metric is strong. I'll use this for comparison moving forward to other methods.
 
 ```{r individual partworth model fit}
 model_rsquared <- mcmc_train %>%
   mutate(individual = as.vector(individual_partworth$fitted.values)) %>%
-  select(rating, individual)
+  dplyr::select(rating, individual)
 
 model_rsquared %>%
   summarise(model_R2 = round(cor(individual, rating) ^ 2, 3)) %>%
@@ -290,7 +287,7 @@ In addition to the importance metric, the personal coefficient averages can be t
 
 ```{r aggreagted partworth coefficients table}
 partworth_analysis %>%
-  select(-price_importance, -fashion_importance, -quality_importance) %>%
+  dplyr::select(-price_importance, -fashion_importance, -quality_importance) %>%
   gather(key = "level") %>%
   arrange(level) %>%
   mutate(variable = rep(names(fashion[c(3, 5, 4)]), each = 800)) %>%
@@ -299,11 +296,11 @@ partworth_analysis %>%
   custom_kable()
 ```
 
-Further confirming the table above, the aggregated variable importance plot shows
+Further confirming the table above, the aggregated variable importance plot shows price with the most first place ranks.
 
 ```{r partworth aggregate plot}
 partworth_analysis %>%
-  select(price_importance, fashion_importance, quality_importance) %>%
+  dplyr::select(price_importance, fashion_importance, quality_importance) %>%
   gather(key = "variable") %>%
   group_by(variable) %>%
   summarise(importance_mean = mean(value) * 100) %>%
@@ -315,7 +312,7 @@ partworth_analysis %>%
        x = NULL)
 ```
 
-To conclude this section, I'll also develop the linear model for the fashion data with rating as the outcome and the three design variables as predictors. This returns the same model as found through the `Conjoint` function but, the output is cleaner and less verbose. Overall, it appears all three are highly significant given the low p-values. Both coefficients for fashion and quality show positive associations with increased ratings while price shows negative (i.e. lower prices for higher ratings). Notably, the R squared here is .37, a large decrease from the estimated metric derived from the individual partworth fitted values and actuals.
+To conclude this section, I'll also develop the aggregate linear model for the fashion data with rating as the outcome and the three design variables as predictors. This returns the same model as found through the `Conjoint` function but, the output is cleaner and less verbose. Overall, it appears all three are highly significant given the low p-values. Both coefficients for fashion and quality show positive associations with increased ratings while price shows negative (i.e. lower prices for higher ratings). Notably, the R squared here is .31, a large decrease from the estimated metric derived from the individual partworth fitted values and actuals. Overall though, it appears there is a broad group preference for low cost, high quality, and modern fashion.
 
 ```{r fashion linear model}
 fashion_lm <- lm(rating ~ fashionTraditional + `qualityLow Qual` + priceLowPrice, 
@@ -326,6 +323,7 @@ summary(fashion_lm)
 
 ####Linear Mixed Model Partworth Analysis
 
+The next model will be assessing rating using a linear mixed model. The method allows the effects of both individual consumers and group preferences to be explored. Here, I'll use fixed effects, such that there are normal static coefficients for price, quality, and fashion type, alongside random effects.
 
 ```{r developing linear mixed model, warning=FALSE, message=FALSE}
 fashion_mixed <- lmer(rating ~ fashionTraditional + `qualityLow Qual` + priceLowPrice + 
@@ -333,6 +331,7 @@ fashion_mixed <- lmer(rating ~ fashionTraditional + `qualityLow Qual` + priceLow
                       data = mcmc_train)
 ```
 
+To highlight the fixed effects, I've put them into a table below. Notably, they are the same values as the aggregated linear model from the previous section. This highlights that these coefficients capture the broader group dynamic for preference.
 
 ```{r reviewing fixed effects}
 data.frame(fixef(fashion_mixed)) %>%
@@ -341,6 +340,16 @@ data.frame(fixef(fashion_mixed)) %>%
   custom_kable()
 ```
 
+The other set of coefficients here are random effects. These better capture the individual level preferences and are partworths for this model. Using a model with both sets permits some balance of group and individual preference to be reviewed.
+
+```{r random effects for lmm}
+ranef(fashion_mixed)$respondent %>% 
+  as.data.frame() %>%
+  head() %>%
+  custom_kable()
+```
+
+Despite this added set of coefficients, the intial training R squared is lower than the individual partworth model.
 
 ```{r linear mixed model R2}
 model_rsquared <- model_rsquared %>%
@@ -354,8 +363,9 @@ model_rsquared %>%
 
 ####Markov Chain Monte Carlo (MCMC) Partworth Analysis
 
+The MCMC method here is similar to linear mixed model insofar as it includes both fixed and random coefficients. However, despite this congruence the models have different statistical foundations. MCMC is a Bayesian method that relies on simulation (Gibbs sampling) to derive coefficients. This is a fundamentally divergent different approach to frequentist methods where the effects are estimtated on the given data. With the MCMC regression, the coefficients aren't fixed using data but rather, estimated by sampling values from a distribution. In the model below, this means that the output includes 1000 simulations for intercept, price, quality, and fashion fixed effects in addition to random effects for each respondent (i.e. 400 values per simulation). Much like the linear mixed model, it accounts for a reasonable mix of group and personal preferences.
 
-```{r mcmc regression, warning=FALSE, message=FALSE, cache=TRUE}
+```{r mcmc regression, warning=FALSE, message=FALSE}
 library(MCMCpack)
 
 fashion_mcmc <- MCMChregress(fixed = rating ~ fashionTraditional + 
@@ -371,7 +381,7 @@ fashion_mcmc <- MCMChregress(fixed = rating ~ fashionTraditional +
                              verbose = 0)
 ```
 
-
+The initial R squared for the method is .797. For comparison, I've included all the model here where it is evident that the individual partworth approach has the highest coefficient for training.
 
 ```{r mcmc R2 and final compares}
 model_rsquared <- model_rsquared %>%
@@ -386,6 +396,9 @@ model_rsquared %>%
 
 ####Assess the performance of the individual, mixed effects, and mcmc model using holdout
 
+Prior to reviewing the holdout results for each model, there's some set up that needs to be done. There's no prediction function for the MCMC regression in this pacakge so I'll have to manually estimate the test ratings using the fixed and random effects from each simulation.
+
+With this in mind, the estimation requires two broad set of values. First, the average value for each fixed effect coefficient to use as model constants. This applies to the intercept as well as each design feature. Second, the prediction requires a random effect value for each person by variable. Deriving this requires taking the average from each variable simulation run by respondent. The result of this process is shown in the table below. As seen, each respondent has both a fixed and random effect associated with their design preferences.
 
 ```{r mcmc test development}
 mcmc_coef <- fashion_mcmc$mcmc %>%
@@ -419,14 +432,6 @@ mcmc_rand_means <- mcmc_coef %>%
          respondent = as.numeric(respondent)) %>%
   spread(key = "name", value = "rand_mean")
 
-mcmc_rand_means <- data.frame(
-  respondent = unique(mcmc_rand_means$respondent),
-  fashionTrad = na.omit(mcmc_rand_means$fashionTrad),
-  Intercept = na.omit(mcmc_rand_means$Intercept),
-  priceLow = na.omit(mcmc_rand_means$priceLow),
-  qualityLow = na.omit(mcmc_rand_means$qualityLow)
-)
-
 mcmc_coef <- fashion_mcmc$mcmc %>%
   as.data.frame() %>%
   dplyr::select(1:4) %>%
@@ -446,8 +451,19 @@ mcmc_means <- data.frame(
   qualityLow = na.omit(mcmc_rand_means$qualityLow)
 )
 
+mcmc_means %>%
+  arrange(respondent) %>%
+  head() %>%
+  custom_kable()
+```
+
+Following this, I developed a function to streamline the test predictions. `mcmc_predict` puts togehter the fixed and random effects for each person and multiplies them by their test values for each variable.
+
+The first five predictions from each method are shown below. At first glance, it appears the individual partworth performance does not translate well to the test scenario. The mixed effects model looks to be the best fit here, though this is a preliminary intuition.
+
+```{r model prediction development, warning=FALSE}
 mcmc_predict <- function(n, x1, x2, x3){
-  int <- (mcmc_means$fixedIntercept[n] + mcmc_rand_means$Intercept[n])
+  int <- (mcmc_means$fixedIntercept[n] + mcmc_means$Intercept[n])
   price <- (mcmc_means$fixedPrice[n] + mcmc_means$priceLow[n]) * x1
   qual <- (mcmc_means$fixedQual[n] + mcmc_means$qualityLow[n]) * x2
   fash <-  (mcmc_means$fixedTrad[n] + mcmc_means$fashionTrad[n]) * x3
@@ -455,12 +471,7 @@ mcmc_predict <- function(n, x1, x2, x3){
   
   return(yhat)
 }
-```
 
-
-
-
-```{r model prediction comparison, warning==FALSE}
 model_predictions <- data.frame(
   actual = mcmc_test$rating,
   individual = as.vector(predict(individual_partworth,
@@ -472,31 +483,82 @@ model_predictions <- data.frame(
                       x3 = mcmc_test$fashionTraditional)
 )
 
-cor(model_predictions)[-1, 1] %>%
-  as.data.frame() %>%
-  rownames_to_column(var = "set") %>%
-  rename(correlation = ".") %>%
-  arrange(desc(correlation)) %>%
+model_predictions %>%
+  head(5) %>%
   custom_kable()
 ```
 
+To make a more formal comparison, I'm using the mean squared error (MSE) which computes the average squared difference between two numeric vectors. The mixed effects model has the lowest value indicating the best fit on the holdout data. 
+
+```{r error comparison for each model}
+c(Mixed_mse = Metrics::mse(actual = model_predictions$actual, 
+                           predicted = model_predictions$mixed),
+  Individual_mse = Metrics::mse(actual = model_predictions$actual, 
+                                predicted = model_predictions$individual),
+   MCMC_mse = Metrics::mse(actual = model_predictions$actual, 
+                           predicted = model_predictions$mcmc)) %>%
+  custom_kable()
+```
+
+***
+
+###Clustering Mixed Effects Partworths to Define Benefit Segments
+
+The mixed model partworths are the random effects. Essentially, these are the individual level preference coefficients for each design profile. Before moving into the clustering, I'm collecting the partworths and analyzing them to which variable stands out as having the highest importance. As seen in the plot, quality has the highest importance followed by fashion. Interestingly, price is the least important which could have very interesting business ramifications. With these rankings, I think the cluster means should be driven primarily by quality and fashion style. 
+
+```{r mixed effect model partworth importance, warning=FALSE}
+rand_partworths <- ranef(fashion_mixed)$respondent %>% 
+  as.data.frame() %>%
+  dplyr::select(-1) %>%
+  rename(lowPrice = priceLowPrice,
+         traditional = fashionTraditional,
+         lowQual = "`qualityLow Qual`") %>%
+  mutate(highPrice = lowPrice * -1,
+         highQual = lowQual * -1,
+         modern = traditional * -1,
+         fashion_importance = abs(modern) + abs(traditional),
+         quality_importance = abs(highQual) + abs(lowQual),
+         price_importance = abs(highPrice) + abs(lowPrice))
+
+partworth_sum <- rand_partworths %>%
+  dplyr::select(fashion_importance, quality_importance, price_importance) %>%
+  rowSums()
+
+rand_partworths <- rand_partworths %>%
+  mutate_at(vars(fashion_importance, 
+                 price_importance, 
+                 quality_importance), function(x) x / partworth_sum)
+
+rand_partworths %>%
+  dplyr::select(fashion_importance, price_importance, quality_importance) %>%
+  apply(., 1, function(x) rank(- x)) %>%
+  t() %>%
+  as.data.frame() %>%
+  gather(key = "variable", value = "rank") %>%
+  count(variable, rank) %>%
+  ggplot(aes(rank, n, fill = variable)) +
+  geom_col(show.legend = F) +
+  facet_wrap(facets = "variable") +
+  labs(title = "Variable importance rank for mixed effect model partworths- Quality has most first place ranks",
+       subtitle = "Moving into clustering, quality and fashion type will likely be major segment drivers",
+       y = NULL)
+```
+
+Moving into the clustering, I'm making a train and test split so the results can be verified on a holdout set. My initial task is the pick an appropriate number of clusters but, this comes with a caveat. The benefit segments need to be driven by the business so any final approaches need to be verified with the product stakeholders. As such, I'd make a recommendation for cluster size but, would ultimately let the business drive any final cluster numbers. The variance acconuted for (VAF) scree plot shows somewhere between 3 and 6 being reasonable. Additionally, the train and test VAF align, which provides assurances that the approach is sound in holdout. 
 
 ```{r clustering partworths}
-rand_partworths <- ranef(fashion_mixed)$respondent %>% 
-  as.data.frame()
-
 set.seed(1017)
-data_split <- sample(x = nrow(partworth_analysis), 
-                     size = nrow(partworth_analysis) * .7, 
+data_split <- sample(x = nrow(rand_partworths), 
+                     size = nrow(rand_partworths) * .7, 
                      replace = F)
 
-training <- partworth_analysis %>%
-  slice(data_split) %>%
-  select(fashion_1, quality_1, price_1)
+training <- rand_partworths %>%
+  mutate(respondent = seq(1, n(), 1)) %>%
+  slice(data_split)
 
-testing <- partworth_analysis %>%
-  slice(-data_split) %>%
-  select(fashion_1, quality_1, price_1)
+testing <- rand_partworths %>%
+  mutate(respondent = seq(1, n(), 1)) %>%
+  slice(-data_split)
 
 cluster_collect <- function(return, training_data, test_data, cluster_n, n_start, seed){
   set.seed(seed = seed)
@@ -527,7 +589,7 @@ vaf_compare <- map_df(2:10, function(x) cluster_collect(seed = 1017,
                                              n_start = 100))
 
 vaf_compare %>%
-  select(-total_diff, -percent_diff) %>%
+  dplyr::select(-total_diff, -percent_diff) %>%
   gather(key = data_set, value = vaf, train_VAF:test_VAF) %>%
   mutate(data_set = factor(data_set, levels = c("train_VAF", "test_VAF"))) %>%
   ggplot(aes(cluster, vaf, colour = data_set)) +
@@ -537,15 +599,15 @@ vaf_compare %>%
   geom_vline(xintercept = 3, alpha = .3, colour = "blueviolet", size = 1.3) +
   geom_vline(xintercept = 6, alpha = .3, colour = "blueviolet", size = 1.3) +
   annotate("rect", xmin = 3, xmax = 6,
-           ymin = .47, ymax = .86, 
+           ymin = .7, ymax = .97, 
            alpha = .1, fill = "blueviolet") +
   scale_color_manual(values = c("royalblue2", "darkorange")) +
   labs(title = "Variance Accounted For (VAF) Screeplot for training and test clusters",
-       subtitle = "Training and test remain close providing assurance that cluster groups are reasonable; Selecting 3 to 6 clusters seems appropriate",
+       subtitle = "Training and test remain close providing assurance that cluster groups are reasonable; dplyr::selecting 3 to 6 clusters seems appropriate",
        y = "VAF")
 ```
 
-
+Another useful method for reviewing the cluster composition is visualization. For this, I've orthogonalized the partworths using principle components analysis (PCA) and taken the first two component factor scores. This dimensional reduction permits the clusters to be reviewed using a plot.
 
 ```{r cluster visualization}
 comparison_df <- map(2:10, function(x) cluster_collect(seed = 1017,
@@ -559,7 +621,7 @@ comparison_df <- map(2:10, function(x) cluster_collect(seed = 1017,
   mutate(data_set = "training", 
          F1_scores = princomp(training)$scores[,1],
          F2_scores = princomp(training)$scores[,2]) %>%
-  select(data_set, F1_scores, F2_scores, everything())
+  dplyr::select(data_set, F1_scores, F2_scores, everything())
 
 comparison_df <- comparison_df %>%
   bind_rows(
@@ -574,7 +636,7 @@ comparison_df <- comparison_df %>%
   mutate(data_set = "testing", 
          F1_scores = princomp(testing)$scores[,1],
          F2_scores = princomp(testing)$scores[,2]) %>%
-  select(data_set, F1_scores, F2_scores, everything())
+  dplyr::select(data_set, F1_scores, F2_scores, everything())
 )
 
 
@@ -583,14 +645,15 @@ comparison_df %>%
   custom_kable()
 ```
 
+Examining the train and test split, I'm confident that the model translates well to holdout given the similar cluster size and composition. From a business perspective, it's also good to see such a clean split between groups. This limited overlap ensures that each benefit segment has broadly homogenous design preferences. 
 
-```{r clustering visualization}
+```{r clustering visualization, fig.height=8.5, fig.width=12.5}
 comparison_df %>%
-  gather(key = "cluster", value = "value", -data_set, -F1_scores, -F2_scores) %>%
+  gather(key = "cluster", value = "group", -data_set, -F1_scores, -F2_scores) %>%
   mutate(data_set = factor(data_set, levels = c("training", "testing")), 
-         value = as.factor(value),
+         group = as.factor(group),
          cluster = factor(cluster, levels = names(comparison_df)[4:12])) %>%
-  ggplot(aes(F1_scores, F2_scores, colour = value)) +
+  ggplot(aes(F1_scores, F2_scores, colour = group)) +
   geom_jitter(alpha = .5) +
   facet_grid(cluster ~ data_set, scales = "free") +
   theme_bw() +
@@ -600,44 +663,141 @@ comparison_df %>%
        y = "PCA 2")
 ```
 
+When devleoping the k-means segments, I played around with different cluster numbers to find a solution that made business sense while first staying between 3 and 6 as per the scree plot. Below, the solution for five segments is displayed.
 
-```{r focused clustering vis}
-comparison_df %>%
-  gather(key = "cluster", value = "value", -data_set, -F1_scores, -F2_scores) %>%
-  mutate(data_set = factor(data_set, levels = c("training", "testing")),
-         value = as.factor(value)) %>%
-  filter(cluster == "CL4" | cluster == "CL5") %>%
-  ggplot(aes(F1_scores, F2_scores, colour = value)) +
-  geom_jitter(size = 2, alpha = .4) +
-  facet_grid(cluster ~ data_set, scales = "free") +
-  theme_bw() +
-  labs(title = "Train and test cluster groups visualized using PCA- Focus on Clusters 4 and 6",
-       subtitle = "Both sets show very similiar group size and shape providing further evidence that test clustering split is sound",
-       x = "PCA 1",
-       y = "PCA 2")
-```
+The reason I chose five segments is because the clustering, regardless of k choice, produces three basic groups: low quality modern, high quality traditional, and preference agnostic. The output for this k can be verified below.
 
-
-
-```{r reviewing cluster means}
+```{r reviewing cluster means for three k}
 set.seed(1017)
-four_segments <- kmeans(training, centers = 4, nstart = 100)
+three_segments <- training %>%
+  dplyr::select(1:6) %>%
+  kmeans(., centers = 3, nstart = 100)
 
-as.data.frame(four_segments$centers) %>%
-  mutate(Group = 1:4) %>%
-  select(Group, everything()) %>%
+var_levels <- c("highQual", "lowQual", "modern", "traditional", "highPrice", "lowPrice")
+
+as.data.frame(three_segments$centers) %>%
+  mutate(Group = 1:3) %>%
+  dplyr::select(Group, everything()) %>%
   gather(key = "variable", value = "means", -Group) %>%
-  mutate(Group = as.factor(Group)) %>%
+  mutate(Group = as.factor(Group),
+         variable = factor(variable, levels = var_levels)) %>%
   ggplot(aes(variable, means, fill = Group)) +
   geom_col(show.legend = F) +
   geom_hline(yintercept = 0, size = 1.3, alpha = .5, colour = "darkgray") +
   facet_wrap(facets = "Group", nrow = 1) +
-  scale_y_continuous(breaks = seq(-2, 2, .5)) +
-  labs(title = "Faceted lines plot for variable means by group for six cluster k-means model",
-   subtitle = "Plot highlights variable means by cluster group; For example, group 6 has largest mean Age signalling older customer segment",
+  scale_y_continuous(breaks = seq(-1, 1, .25)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1)) +
+  labs(title = "Faceted lines plot for variable means by group for three cluster k-means model",
+   subtitle = "Plot highlights variable means by cluster group; For example, group 1 has no express design preferences",
    y = "group means",
    x = NULL)
 ```
 
+Any of the k variants I tried subdivided these high levels groups. Given this result, I felt five was appropriate because it adds nuance to each fashion concious group while not splitting the agnostic consumers any further. This leaves a dedicated and light consumers segment for both low quality modern and high quality traditional. My other preference here would be the initial three segment split.
 
+As a methodological note, I also tried the clustering with only three partworths instead of all six given they are just mirrored values. While the end results do not change between three and six approaches, I chose six so the visualization and interpretation is clearer. Including all six allows for independent review of each variable which ensures that the initial three do not need to be thought of as two variables at the same time. Additionally, the means are consistent and do not show any conflicts (for example, both high for modern and traditional). Overall, I preferred this approach due to better interpretation.
 
+```{r reviewing cluster means for five k}
+set.seed(1017)
+five_segments <- training %>%
+  dplyr::select(1:6) %>%
+  kmeans(., centers = 5, nstart = 100)
+
+as.data.frame(five_segments$centers) %>%
+  mutate(Group = 1:5) %>%
+  dplyr::select(Group, everything()) %>%
+  gather(key = "variable", value = "means", -Group) %>%
+  mutate(Group = as.factor(Group),
+         variable = factor(variable, levels = var_levels)) %>%
+  ggplot(aes(variable, means, fill = Group)) +
+  geom_col(show.legend = F) +
+  geom_hline(yintercept = 0, size = 1.3, alpha = .5, colour = "darkgray") +
+  facet_wrap(facets = "Group", nrow = 1) +
+  scale_y_continuous(breaks = seq(-1, 1, .25)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 65, hjust = 1)) +
+  labs(title = "Faceted lines plot for variable means by group for five cluster k-means model",
+   subtitle = "Plot highlights variable means by cluster group; For example, group 5 has the highest preference for high quality traditional designs",
+   y = "group means",
+   x = NULL)
+```
+
+Taking a quick step back, I'm highlighting the PCA cluster visualization again but, just for the five cluster approach. This just reconfirms that the clusters seem to be independent of one another with little overlap.
+
+```{r focused clustering vis}
+comparison_df %>%
+  gather(key = "cluster", value = "group", -data_set, -F1_scores, -F2_scores) %>%
+  mutate(data_set = factor(data_set, levels = c("training", "testing")),
+         group = as.factor(group)) %>%
+  filter(cluster == "CL5") %>%
+  ggplot(aes(F1_scores, F2_scores, colour = group)) +
+  geom_jitter(size = 2, alpha = .4) +
+  facet_grid(cluster ~ data_set, scales = "free") +
+  theme_bw() +
+  labs(title = "Focused review of train and test for 5 clusters",
+       subtitle = "Both sets show clusters that are distinct with very little overlap",
+       x = "PCA 1",
+       y = "PCA 2")
+```
+
+***
+
+###Driving Business Value: Naming final segments and reviewing marketing activities
+
+With the segments developed, the analysis shifts from technical to business focused. One of the clear objectives here is to name the new benefit segments and then assess how many consumers fall into each group. Based on the mean values from each cluster, as derived from the visualizations, I've named each segment below. As aforementioned, this means that each fashion concious class has a light and dedicated segment while the final group is more consumers without express preference for any design feature.
+
+The light low quality modern cluster has the largest number of consumers (n = 85). Perference agnostic consumres are  probably the least interesting group from a marketing perspective but, have the second highest cluster size. Each dedicated group is also small, which is likely a reflection of having fewer people with these more extreme  design preferences.
+
+```{r cluster counting for partworths}
+final_naming_set <- training %>%
+  dplyr::select(respondent, quality_importance, fashion_importance, price_importance) %>%
+  mutate(benefit_segment = five_segments$cluster,
+         segment_name = case_when(
+        benefit_segment == 1 ~ "Light LowQual & Modern",
+        benefit_segment == 2 ~ "Light HighQual & Traditional",
+        benefit_segment == 3 ~ "Preference Agnostic",
+        benefit_segment == 4 ~ "Dedicated LowQual & Modern",
+        benefit_segment == 5 ~ "Dedicated HighQual & Traditional"
+         )
+       ) %>%
+  inner_join(x = ., y = fashion, by = "respondent") %>%
+  dplyr::select(-fashion, -price, -quality, -rating) %>%
+  filter(!duplicated(respondent))
+
+final_naming_set %>%
+  count(benefit_segment, segment_name) %>%
+  mutate(total_percent = round(n / sum(n) * 100, 2)) %>%
+  dplyr::select(benefit_segment, segment_name, n, total_percent) %>%
+  custom_kable()
+```
+
+To further enrich this analysis, I also merged the naming set with the initial fashion data so I could ascertain which demogrpahic characteristics each benefit was associated with. The young women stand out as having design preference for low quality and modern looks. Women as a whole seem less agnostic towards their fashion preferences when compared to men as well. In fact, preference agnostic is the largest count in every male age group and especially pronounced amongst young men. This chart could be used to evaluate what marketing activities would be reasonable to target for a certain demographic.
+
+```{r segment names vis with gender and age}
+final_naming_set %>%
+  count(segment_name, gender, age) %>%
+  ggplot(aes(segment_name, n, fill = segment_name)) +
+  geom_col(show.legend = F) +
+  facet_grid(gender ~ age) +
+  theme_bw() +
+  coord_flip() +
+  labs(title = "Benefit segment breakdown by gender and age",
+       subtitle = "Young women have largest segment count in Light LowQual & Modern",
+       y = NULL,
+       x = NULL)
+```
+
+####Business reflections: Evaluating marketing decisions based on results
+
+With the segments developed and named, I think the firm has numerous options for next steps. At the more competitive level, the segments could be further enriched with more data. Specifically, developing a survey to gather responses on attitudes, buying habits, lifestyle, and fashion needs would equip segments that were comprehensive on product and general consumer insights. This would be a powerful combination and would situtate the firm well at the competitive level for their fashion product category.
+
+Based on these results, the firm might also want to evaluate their product offering. For example, the results seem to suggest offering fashion lines for low quality modern and high quality traditional makes sense. There would likely be room for a much more mixed line to appeal to agnostic consumers, which would be especially attratice in the mens line. Of course, these would all have to align with a wider brand image and marketing approach but, product mix could be refined using these results. It would be important to ask if the results conform to what the company thought about their design mix as well.
+
+Moving into tactical activities, the new segments would be useful for promotions and targeted product launches. Since the design preferences are known, specific fashion lines could be targeted to consumers in specific demographic groups. For example, the 40+ female group had the highest concentration of dedicated high quality and traditional consumers. This group could be given insider sales on new, high end fashion designs. The same concept holds for launching new lines in the respstive style and quality combinations. Given the basic consumer demographics are known, the approprirate marketing channel could be evaluated here as well (i.e matching medium to respondents).
+
+Something I would be inerested in during the tactical promotions and product launches would be pricing. The mixed partworths showed pricing as the least important metric. I'd be interested in trying to gauge price sensitivities with more detail using AB testing or some experimental design. From a business perspective, I'm weary of young respondents not being slightly cost concious. This would be an opportunity to further refine the segments and evaluate how well the solution performs in practice.
+
+Overall, the series of modelling approaches showed that using this fashion data, the mixed effects model was most effective producing a result with the lowest error metric. The end result is a reasonable set of benefit clusters which have business relevance. Their ultimate value would need to be reviewd in close conjunction with the firm's product team so that the marketing activities match any wider company goals. The work would need to be furthre refined using business input but, this would be a sound starting point for defining these design-based clusters for the fashion company.
+
+***
