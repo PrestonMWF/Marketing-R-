@@ -1,0 +1,223 @@
+---
+title: "Credit Card Brand Attribute Ratings"
+author: "Mark Preston"
+date: "November 26, 2018"
+output: 
+  html_document: 
+    fig_height: 6.5
+    fig_width: 10.5
+---
+
+***
+
+###Introduction: Examining brand attribute ratings and consumer preferences
+
+In this analysis, I'll use consumer survey data collected on individual preferences towards credit card companies. This brand strategy data provides a forum for consumers to provide feedback on how they feel about certain banking products. Overall, this analysis will work towards buillding models that establish a relationship between the brand attribute ratings consumers provided and their preference ratings for credit cards.
+
+Before proceeding with the work, I'll highlight data transformations which I performed. Most notably, the initial data set has unclear, non-descriptive column names. The columns are the primarily comprised of the brand attribute ratings so I felt it was essential to better label these. As such, I've provided more descriptive column names. Beyond this, I've changed the missing data values from -99 to 0 (after altering the zero values for the pri_sec column for consistency) and added the brand names for each credit card.
+
+```{r loading data and packages, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(kableExtra)
+library(knitr)
+
+#setting ggplot preference
+theme_set(
+  theme_minimal()
+)
+
+#custom table function
+custom_kable <- function(x){
+  kable(x, format = "html") %>%
+    kable_styling(bootstrap_options = "striped")
+}
+
+cc_brands <- read.csv("Brand_stratategy_data.csv") %>%
+  rename(respondent = "ï..respid",
+         revenue_group = hq_cell,
+         brand = brandid,
+         comp_pref = q6,
+         preference_rating = consider,
+         easy_access = att_rating1,
+         channel_access = att_rating2,
+         products_for_bus = att_rating3,
+         bus_cash_flow = att_rating4,
+         cool = att_rating5,
+         emerging_leader = att_rating6,
+         innovative = att_rating7,
+         personalize_service = att_rating8,
+         trustworthy = att_rating9,
+         responsive_bus_needs = att_rating10,
+         business_advisor = att_rating11,
+         understand_bus_probs = att_rating12,
+         solves_bus_probs = att_rating13,
+         my_best_interests = att_rating14,
+         prestige = att_rating15,
+         feel_valued = att_rating16,
+         dual_recognition = att_rating17,
+         rewards_for_good = att_rating18,
+         bus_rewards_program = att_rating19,
+         easy_application = att_rating20,
+         customer_service = att_rating21,
+         easy_bus_finance = att_rating22,
+         clear_comms = att_rating23,
+         account_infosec = att_rating24,
+         life_easier = att_rating25,
+         easy_bus_invest = att_rating26,
+         quick_app_approval = att_rating27,
+         reasonable_fees = att_rating28,
+         best_prod_rates = att_rating29,
+         fair_treatment = att_rating30,
+         good_value = att_rating31) %>%
+  mutate(pri_sec = ifelse(pri_sec == 0 , 3, pri_sec)) %>%
+  mutate_all(function(x) ifelse(x == -99, 0, x)) %>%
+  mutate(brand = case_when(
+    brand == 1 ~ "Advanta",
+    brand == 2 ~ "Amex",
+    brand == 3 ~ "BoA",
+    brand == 4 ~ "Chase",
+    brand == 5 ~ "Citibank",
+    brand == 6 ~ "HSBC",
+    brand == 7 ~ "Wells_Fargo",
+    brand == 8 ~ "Other_prim",
+    brand == 9 ~ "Other_sec"
+  )
+)
+```
+
+***
+
+###Exploratory Data Anlaysis: Reviewing credit card preferences
+
+To start, I want to review how many responses each individual has. A count table for the first five respondents shows 9 responses each, or one for each brand.
+
+```{r number of customer reviews}
+cc_brands %>%
+  count(respondent) %>%
+  head() %>%
+  kable(format = "html", align = "l") %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+As a data quality check, I also wanted to make sure every respondent had nine brand reviews. The logical output shows that there are no respondents without the required number. This means no further data cleaning needs to take place.
+
+```{r checking to see if consumers have equal values}
+cc_brands %>%
+  count(respondent) %>%
+  summarise(any_respondent_without_nine_reviews = any(n != 9)) %>%
+  custom_kable()
+```
+
+Moving forward, I also wanted to review how many respondents fall into each of the revenue groups. There is essentially a low, medium, and high group for this variable; of these, high has the most participants.
+
+```{r revenue category counts}
+cc_brands %>%
+  filter(!duplicated(respondent)) %>%
+  count(revenue_group) %>%
+  kable(format = "html", align = "l") %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+Getting into the cardholder details, I've developed a table with the primary card counts. the largest group is respondents indicating they use a primary card outside of the seven named brands. After this, Bank of America has the highest count. Advanta has the fewest respondents using it as a primary card with only two. These are the first indications of how different brands might be perceived by consumers. For example, I do not think Advanta will have especially high ratings given the low primary usage.
+
+```{r reviewing primary card choice}
+cc_brands %>%
+  filter(pri_sec == 1) %>%
+  count(pri_sec, brand, sort = T) %>%
+  kable(format = "html", align = "l") %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+Building on the previous section, I also wanted to review missing data for each brand. The initial data set contains numerous missing values, which are present when a respondent doesn't know the brand and cannot offer a brand rating. In essence, I think this becomes a proxy for brand awareness where a low number of missing values means more respondents have an opinion or direct association with the card. As seen, Advanta has the most missing values, which is in line with the previous section where it had the fewest primary users. Amex and Chase have the fewest, which seems intuitive given how large the brands are. 
+
+```{r checking on missing data}
+cc_brands %>%
+  select(3, 8:38) %>%
+  group_by(brand) %>%
+  gather(key = "variable", value = "value", -brand) %>%
+  filter(value == 0) %>%
+  count(value, sort = T) %>%
+  custom_kable()
+```
+
+Moving into the preference ratings, I've put together the average score for each brand. The highest mean score for a named brand is Amex while an unnamed secondary card- which could be more than one brand- is top here. The previous work seemed to indicate Advanta might have a low rating, which is confirmed here; it has the lowest average preference rating by about 2.7 points. The rating scale here is from 1 to 11 (and I've filtered out the unknown values, which are 12) so that means Advanta isn't much above the lowest score.
+
+```{r avg perference rating}
+cc_brands %>%
+  filter(preference_rating != 12) %>%
+  group_by(brand) %>%
+  summarise(avg_pref_rating = mean(preference_rating)) %>%
+  arrange(desc(avg_pref_rating)) %>%
+  custom_kable()
+```
+
+As a final review before the modelling phase, I wanted to see the average brand rating given by respondents across each question and brand. Amex sticks out here again as a brand with high consumer ratings. For example, respondents gave the question about information security an average of about 2.5. On a scale with only 3 values, this means that respondents view the score at about medium-high on average. Chase and Bank of America also stick out as having all average scores over 1.5. Yet again, Advanta shows the poorest metrics of any card, this time with the lowest brand ratings. The crucial question moving forward is how these brand ratings are associated with the consumer prefererence ratings.
+
+```{r avg brand rating by brand and question, fig.height=10, fig.width=11}
+cc_brands %>%
+  select(3, 8:38) %>%
+  group_by(brand) %>%
+  summarise_if(is.numeric, function(x) mean(x)) %>%
+  gather(key = "variable", value = "value", -brand) %>%
+  mutate(brand = factor(brand, levels = c("Other_sec", "Amex", "Citibank", "BoA",
+                                          "Chase", "Wells_Fargo", "HSBC",
+                                          "Other_prim", "Advanta")),
+         variable = reorder(variable, value)) %>%
+  filter(value != 4) %>%
+  ggplot(aes(variable, value, colour = brand, fill = brand)) +
+  geom_col(show.legend = F) +
+  geom_hline(yintercept = 1.5, colour = "firebrick1", size = 1.3, alpha = .75) +
+  coord_flip() +
+  facet_wrap(facets = "brand") +
+  labs(title = "Average brand rating by question in credit card preference set",
+       subtitle = "Amex and Chase appear to have highest brand ratings (values scored from 1 to 3); red line denotes middle score (1.5)",
+       x = NULL,
+       y = "brand rating avg")
+```
+
+***
+
+
+
+
+*** 
+
+modelling theorized causal relationships
+reviewing numerous paths between variables
+Have to have theory in advance so it's mostly confirmatory
+exogenous variables are the independent, causal variables
+endogenous are the predictors
+SEM is about taking a theory and testing if they work
+looking for low error
+SMC is R2 (squared multiple correlations) for each endogenous variable
+models estimated on covariance between all of the model items
+
+
+lavaan
+sempa
+
+```{r}
+brand_model <- "
+service_features =~ easy_access + channel_access + personalize_service + 
+  rewards_for_good + easy_application + customer_service + clear_comms + account_infosec +
+  quick_app_approval + best_prod_rates + dual_recognition
+
+brand_perception =~ cool + emerging_leader + innovative + prestige + trustworthy
+
+product_attitude =~ my_best_interests + feel_valued + life_easier + reasonable_fees +
+  fair_treatment + good_value
+
+business_support =~ products_for_bus + bus_cash_flow + responsive_bus_needs +
+  business_advisor + understand_bus_probs + solves_bus_probs + bus_rewards_program +
+  easy_bus_finance + easy_bus_invest
+
+#overall latent arrangement
+
+overall_pref =~ service_features + business_support + brand_perception + product_attitude
+"
+
+sem_fit <- sem(model = brand_model, data = cc_brands)  
+
+semPaths(object = sem_fit, whatLabels = "std")
+```
+
