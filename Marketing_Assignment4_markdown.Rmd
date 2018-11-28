@@ -18,6 +18,10 @@ Before proceeding with the work, I'll highlight data transformations which I per
 
 ```{r loading data and packages, warning=FALSE, message=FALSE}
 library(tidyverse)
+library(corrplot)
+library(lavaan)
+library(semPlot)
+library(Metrics)
 library(kableExtra)
 library(knitr)
 
@@ -177,10 +181,162 @@ cc_brands %>%
 
 ***
 
+###Linear model with brand ratings: Structural problems and multicollinearity
 
+One method for assessing the relationship between brand ratings and preference is regression. However, this approach is difficult owing to a few issues. First, the brand rating data are generally quite noisy owing to a small scale (1 to 4) which can create a lot of variance between respondent answers. 
 
+Additionally, the set has extremely high multicollinearity. The correlation plot below shows that each variable has very high correltion with almost every other variable. Again, this is largely because all the values are positive and closely aligned to begin with, which inherently introduces this structure. The introduction of multicollinearity inflates standard errors and therefore, will negatively impact any regression modelling.
 
-*** 
+```{r correlation plot between variables}
+cc_brands %>%
+  select(7:38) %>%
+  cor() %>%
+  corrplot(type = "upper")
+```
+
+Just to highlight this, I've developed a linear model with all the brand ratings. The plot below shows the predictions are erratic and at times nowhere near correct. Overall, this would not be suitable for any prediction task.
+
+```{r modelling set up}
+profiles <- c(seq(1, nrow(cc_brands), 9), seq(5, nrow(cc_brands), 9)) %>%
+  as.data.frame() %>%
+  rename(holdout = ".") %>%
+  arrange(holdout)
+
+brand_train <- cc_brands %>%
+  select(1, 7:38) %>%
+  filter(!row_number() %in% profiles$holdout)
+
+brand_test <- cc_brands %>%
+  select(1, 7:38) %>%
+  filter(row_number() %in% profiles$holdout)
+
+brand_lm <- lm(preference_rating ~ ., data = brand_train[,-1])
+
+data.frame(
+  record = seq(1, nrow(brand_train), 1),
+  fitted = brand_lm$fitted.values,
+  actual = brand_train$preference_rating
+) %>% 
+  mutate(actual = ifelse(actual == 0, .1, actual),
+         percent_diff = (actual - fitted) / actual * 100) %>%
+  ggplot(aes(record, percent_diff)) +
+  geom_line(colour = "dodgerblue2", alpha = .5) +
+  labs(title = "Percent differences between actuals and fitted values: (act - fit) / fit",
+       subtitle = "Model shows a very poor fit owing in part to multicollinearity")
+```
+
+Apart from the predictive component, the model summary also provides cause for concern. The slope coefficients and p-values are variable and do not show any intuitive pattern for why a feature might be positive or negative. Again, this is the product of multicollinearity. Overall, I do not think this approach yields a reasonable solution  
+
+```{r brand lm summary}
+summary(brand_lm)
+```
+
+***
+
+###PCA regression and factor analysis with brand data
+
+To effectively deal with the set's multicollinearity, principle components analysis (PCA) is a reasonable solution. The method orthogonalizes the input data resulting in predictors that are uncorrelated. Additionally, the information from numerous columns can be compacted into fewer variables so there are fewer variables to work with (dimensional reduction). To begin this process, I've conducted PCA on the predictors here. As a note, I elected not to transform the variables since they are all on the same rating scale.
+
+Selecting the correct number of factors here can be accomplished using a scree plot. The visualization shows a definite break at seven components. That said, the first principle component captures 89% of the variance with only 1% increases thereafter. As such, I think taking seven is too many as PCA2 to PCA7 only capsture 6% of the variance. I'm going to carry forward the first three, which still captures a very high 91% of variance. As always, in a business setting this approach would need to be verified with the brand manager to ensure this was reasonable.
+
+```{r brand pca set up and scree}
+brand_pca <- princomp(x = cc_brands[,8:38])
+
+data.frame(dev = brand_pca$sdev ^ 2) %>%
+  rownames_to_column(var = "PC") %>%
+  mutate(variance_exp = round(dev / (sum(dev)), 2),
+         vaf = cumsum(variance_exp),
+         PC = str_replace(string = PC, pattern = "Comp.", replacement = "PCA"),
+         vaf_line = "line") %>%
+  slice(1:9) %>%
+  ggplot(aes(PC, vaf, group = vaf_line, label = paste0(vaf * 100,"%"))) +
+  geom_line(colour = "royalblue2", size = 1.3) +
+  geom_label(hjust = 0, nudge_x = 0.15, nudge_y = 0) +
+  geom_vline(xintercept = 7, size = 1.3, colour = "darkorange") +
+  labs(title = "PCA scree plot- Variance explanation heavily found in PCA1",
+       subtitle = "With variance concentration, choosing 3 principle components seems reasonable despite elbow at 7",
+       x = NULL)
+```
+
+As part of the PCA, I'll also review the component loadings for each variable. This provides insight into what information is captured in each principle component. To do so, I've developed a faceted bar chart for each component. Overall, the factors do lend enough variability so each can be named and interpreted. These can be found below:
+
+####Factor interpretation and naming
+
+##### - PCA1 attributes: Uniformly negative scores
+##### - Name: Steady Dislike
+
+##### - PCA2 attributes: Highest positive scores for trustworthy, prestige, emerging leader, easy access, and cool
+##### - Name: Brand Perception
+
+##### - PCA3 attributes: Highest positive scores for service and product related features (clear comms, customer service, easy application, etc.). Additionally, low on brand perception valus
+##### - Name: Product and Features Utility
+
+```{r brand factor analysis}
+as.data.frame(brand_pca$loadings[,1:3]) %>%
+  rownames_to_column(var = "variable") %>%
+  rename_all(function(x) gsub(pattern = "Comp.", 
+                              replacement = "PCA", 
+                              x = x)) %>%
+  gather(key = "pca", value = "pca_loadings", -variable) %>%
+  ggplot(aes(variable, pca_loadings, fill = pca)) +
+  geom_col(show.legend = F) +
+  facet_wrap(facets = "pca", nrow = 1) +
+  geom_hline(yintercept = 0, alpha = .5, size = 1.3, colour = "darkgray") +
+  scale_y_continuous(breaks = seq(-1, 1, .2)) +
+  coord_flip() +
+  labs(title = "Faceted bar charts for factor loadings from each principle component",
+       subtitle = "Factor interpretation- PCA1: Steady Dislike, PCA2: Brand Perception, PCA3: Product and Features Utility",
+       y = "pca loadings",
+       x = NULL)
+```
+
+With the new components named, I've put together a train and test split with the factor scores so a linear model can be developed. These are used the same way the initial predictors are so I've also added the preferences ratings back in so the model can be cast using one data set.
+
+The summary shows signficant coefficients for all three variables. The slope coefficients are far more interpretable here owing to the transformation and seem intuitive. Both brand perception and product utility are associated with higher preference ratings while the steady dislike feature is negative. Between brand and product utility, the perception component has a higher slope coefficient as well. The model's R2 is about .47, which is only a slight drop from the initial linear attempt (.49).
+
+```{r brand pca regression}
+brand_factors <- brand_pca$scores %>%
+  as.data.frame() %>%
+  dplyr::select(1:3) %>%
+  rename(Steady_Dislike = "Comp.1",
+         Brand_Perception = "Comp.2",
+         Product_Utility = "Comp.3") %>%
+  mutate(preference_rating = cc_brands$preference_rating,
+         respondent = cc_brands$respondent)
+
+pca_train <- brand_factors %>%
+  filter(!row_number() %in% profiles$holdout)
+
+pca_test <- brand_factors %>%
+  filter(row_number() %in% profiles$holdout)
+
+brand_pca_lm <- lm(preference_rating ~ Steady_Dislike + 
+                     Brand_Perception + 
+                     Product_Utility, 
+                   data = pca_train)
+
+summary(brand_pca_lm)
+```
+
+While the pca regression helps with coefficient interpretation, it does not enhance the model's predictive capabilities. This is because the predictors are only being compressed and represented in a different form, which means no new information is added. In fact, the pca model has slightly less variance explanation. 
+
+Reviewing the mean absolute error (MAE) for both the train and test still shows poor predictive powers. The test MAE is about 4.4, which means each prediction is off by that many points. The initial preference ratings only have an 11 point scale so this is poor. For example, a perfect 11 might be predicted at 6.6, a value which tells a very different customer brand preference story. Overall, while the pca model was very useful for getting a better understanding of the relationship between brand attribute ratings and preferences, it is not useful for prediction. Here, the inferential component far outweighs the forward looking aspect.
+
+```{r prediction review}
+data.frame(
+  model = c("train", "test"),
+  mae = c(
+    mae(actual = pca_train$preference_rating, 
+        predicted = brand_pca_lm$fitted.values),
+    mae(actual = pca_test$preference_rating, 
+        predicted = predict(brand_pca_lm, pca_test))
+  )
+) %>% custom_kable()
+```
+
+***
+
+###Confirmatory Structural Equation Modelling
 
 modelling theorized causal relationships
 reviewing numerous paths between variables
@@ -196,28 +352,58 @@ models estimated on covariance between all of the model items
 lavaan
 sempa
 
-```{r}
+```{r SEM modelling}
 brand_model <- "
-service_features =~ easy_access + channel_access + personalize_service + 
+SF =~ easy_access + channel_access + personalize_service + 
   rewards_for_good + easy_application + customer_service + clear_comms + account_infosec +
   quick_app_approval + best_prod_rates + dual_recognition
 
-brand_perception =~ cool + emerging_leader + innovative + prestige + trustworthy
+BP =~ cool + emerging_leader + innovative + prestige + trustworthy
 
-product_attitude =~ my_best_interests + feel_valued + life_easier + reasonable_fees +
+PA =~ my_best_interests + feel_valued + life_easier + reasonable_fees +
   fair_treatment + good_value
 
-business_support =~ products_for_bus + bus_cash_flow + responsive_bus_needs +
+BS =~ products_for_bus + bus_cash_flow + responsive_bus_needs +
   business_advisor + understand_bus_probs + solves_bus_probs + bus_rewards_program +
   easy_bus_finance + easy_bus_invest
 
 #overall latent arrangement
 
-overall_pref =~ service_features + business_support + brand_perception + product_attitude
+PR =~ SF + BS + BP + PA
 "
 
-sem_fit <- sem(model = brand_model, data = cc_brands)  
+brand_sem <- sem(model = brand_model, 
+                 data = cc_brands,
+                 meanstructure = T)  
 
-semPaths(object = sem_fit, whatLabels = "std")
+semPaths(object = brand_sem, whatLabels = "std")
 ```
 
+
+
+
+```{r reviewing sem}
+summary(object = brand_sem,
+        rsquare = T,
+        standardized = T)
+```
+
+
+```{r sem fit measures}
+fitMeasures(object = brand_sem, fit.measures = c("cfi", "rmsea", "srmr", "pvalue")) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "fit_measure") %>%
+  rename(value = ".") %>%
+  mutate(value = round(value, 3)) %>%
+  custom_kable()
+```
+
+
+***
+
+###References
+
+
+####1. "Fit	Statistics	commonly	reported	for CFA	and	SEM", https://www.cscu.cornell.edu/news/Handouts/SEM_fit.pdf
+
+***
