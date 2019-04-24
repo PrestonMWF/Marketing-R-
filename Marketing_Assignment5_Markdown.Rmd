@@ -1,0 +1,823 @@
+---
+title: "Examining the Canned Tuna Competitive Landscape"
+author: "Mark Preston"
+date: "December 9, 2018"
+output: 
+  html_document: 
+    fig_height: 6.5
+    fig_width: 10
+---
+
+***
+
+###Using price elasticity models to assess tuna brand sales competition
+
+For this analysis, I'll be using canned tuna sales data from the Kilts Center for Marketing at the University of Chicago's Booth School of Business to assess the competitive landscape for the product category. The data is extracted from the Dominick's Finer Foods database and covers tuna sales as well as a measure of display activity, log price, and log wholesale price aggregated weekly for the chain.
+
+I'm going to be focusing on product sales and brand log prices to develop individual price elasticity models. To ensure the analysis also includes multivariate models, I'll develop logarithmic pricing models with each brand's sales as the outcome variable with all every price included. Additionally, I'm interested in how brand pricing affects the total category volume so I'll include a similar modelling approach by incorporating brand prices but, the outcome variable will be total sales. With both of these approaches, the idea is to better capture the interactive market dynamic. 
+
+I'm selecting this approach because these price elasticity models have fairly straightforward interpretations, which is essential for presentation to a business audience. A product group would be able to review the idea of changing sales and price levels in comparison to other brands. Additionally, since I'm using both individual and multivariate regression models, a range of constant and cross elasticities can be reviewed which would allow a group to understand their brand and the wider competitive landscape in concert.
+
+```{r data and package loading, warning=FALSE, message=FALSE}
+library(bayesm)
+library(tidyverse)
+library(corrplot)
+library(gridExtra)
+library(car)
+library(kableExtra)
+library(knitr)
+
+theme_set(
+  theme_minimal()
+)
+
+custom_kable <- function(x){
+  kable(x, format = "html") %>%
+    kable_styling(bootstrap_options = "striped")
+}
+
+data("tuna")
+```
+
+With this goal in mind, I've started by paring down the initial data set. For this, I've included all the brand movement and price variables. I've also added a new column for total sales, which will be the outcome variable for a portion of the analysis. To ensure each variable can be clearly interpreted, I've also added brand names to each column so each can be tracked better. 
+
+```{r developing analysis data set}
+brand_names <- c("starkist", "cs", "bb_solid", "bb_chunk", 
+                 "geisha", "bb_large", "hh_chunk")
+
+tuna_brands <- tuna %>%
+  rename_all(tolower) %>%
+  rename_at(vars(2:29), function(x) paste0(x, "_", brand_names)) %>%
+  rename_all(function(x) str_replace(string = x, 
+                                     pattern = "[0-9]", 
+                                     replacement = "")) %>%
+  mutate(total_sales = move_starkist + move_cs + move_bb_solid + move_bb_chunk +
+           move_geisha + move_bb_large + move_hh_chunk) %>%
+  select(week, move_starkist, move_cs, move_bb_solid, move_bb_chunk,
+         move_geisha, move_bb_large, move_hh_chunk, total_sales, lprice_starkist, 
+         lprice_cs, lprice_bb_solid, lprice_bb_chunk, lprice_geisha, 
+         lprice_bb_large, lprice_hh_chunk)
+
+```
+
+***
+
+###Brand exploratory analysis: Volume, share, and price focus
+
+The data inherently involves time so I wanted to check on how many entries exist in the series. As seen, there are 338 rows, which amounts to just over size years of tuna brand category data. Following the initial variable review, there are 16 columns remaining with a sales volume and price focus. 
+
+```{r set dimension}
+data.frame(
+  dimension = c("rows", "columns"),
+  value = c(dim(tuna_brands)[1], dim(tuna_brands)[2])
+) %>% custom_kable()
+```
+
+Starting the analysis, I've included a sales volume quantile table for each brand. The values here represent the unit sales per brand, which in this case means a single can of tuna. From this, it appears that Chicken of the Sea (cs) has the highest single week of sales with 579,037 units sold. In comparison, this is well over 100,000 units more than the second largest week (442,490), which was registered by Starkist. However, Starkist has larger quantiles compared to Chicken of the Sea, which makes me think it likely has the largest market share. The other large volume players appear to be Bumble Bee chunk and HH chunk, which both have top weeks over 100,000 units.
+
+On the lower volume side, Bumble Bee large can has the narrowest volume quantile range with a top week of only 2032 units. That said, it seems to be a slightly different product, owing to the large serving size, so this might help explain some of the difference. Beyond that, Geisha and Bumble Bee solid seem to be lower volume brands as well. Bumble Bee is the only firm with numerous brands represented as well. These are the first volume insights of the analysis, which appear to suggest there might be two broad tiers in the category for high volume and lower specialty brands.
+
+```{r quantile table for volume}
+tuna_brands %>%
+  select(2:8) %>%
+  apply(., 2, quantile) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "quantile") %>%
+  custom_kable()
+```
+
+Continuing the volume focus, I've developed a histogram for each brand. The plot reveals that the previous upper quantiles I described were the volume exceptions. Six of the brands have positively skewed volume distributions. In fact, Starkist, Chicken of the Sea, Bumble Bee Chunk, and HH Chunk have very thin right tails with almost all their respective volumes concentrated around 6000 to 1000 units. This implies they have several heavy volume weeks but, in general, these are rare. This plot reinforces that the four aforementioned brands seem to be in the same volume class while the remaining three are possibly smaller, specialty options.
+
+```{r tuna volume histograms}
+tuna_sales <- tuna_brands %>%
+  select(week, move_starkist, move_cs, move_bb_solid, move_bb_chunk,
+         move_geisha, move_bb_large, move_hh_chunk) %>%
+  gather(key = "brand", value = "sales", - week) %>%
+  mutate(brand = rep(brand_names, each = nrow(tuna)),
+         brand = factor(brand, levels = brand_names))
+
+tuna_sales %>%
+  ggplot(aes(sales, fill = brand)) +
+  geom_histogram(bins = 20, show.legend = F) +
+  facet_wrap(facets = "brand", scales = "free") +
+  labs(title = "Histogram of tuna sales volume for all seven brands",
+       subtitle = "Most show heavy positive skew; Bumble Bee large is fairly normal")
+```
+
+With the skewed volume distributions, I wanted to check on each brand's median weekly sales volume. These were visible on the histograms but, to get exact values, the table helps illustrate the top sales brands. As seen, Starkist has the largest median sales volume by a fair margin. Here, it almost looks like there are closer to four volume tiers even though broadly there seems to be high and low volume groups.
+
+```{r tuna brand volume median table}
+volume_table <- tuna_sales %>%
+  group_by(brand) %>%
+  summarise(median_volume = median(sales)) %>%
+  mutate(median_volume = round(median_volume, 2)) %>%
+  arrange(desc(median_volume))
+
+volume_table %>%
+  custom_kable()
+```
+
+Given the data is comprised of weekly entries for each brand, I wanted to review the sales volumes as a time series. While the set does not include any specific dates, it still has each week number, so I've visualized volumes at each record. As an additional transformation, I've also taken the log volume so the larger sales spikes evident in the histogram are dampened.
+
+Interestingly, the series seems to add further evidence that Starkist, Chicken of the Sea, Bumble Bee Chunk, and HH Chunk are similar. They each have congruent time series shape, although HH chunk shows some differences. The same series pattern is evident for both Bumble Bee solid large too while Geisha seems more unique. 
+
+Overall, it also appears that Bumble Bee large and solid are the only brands to see an increasing volume trend; the other brands seem stagnant or even declining. Conversely, these trends are minor in both directions so it seems volumes are neutral overall, despite periodic fluctuations. My intuition here is that the volume is seasonally affected, which is highlighted by the variable sales volumes. Unfortunately without dates, it's hard to determine which season are associated with the sales variability but, this affect is still observable.
+
+Another interesting feature here are the volume spikes for each brand. Of note, I think week 76 helps further illustrate some of the competitive volume dynamics well. During this week, Starkist, Chicken of the Sea, Bumble Bee Chunk, and to a lesser extent HH Chunk all display large sales spikes. Concurrently, Bumble Bee solid and Bumble Bee large volumes substantially drop. Geisha sales seem slightly elevated, though not in any exaggerated fashion.
+
+```{r brand volume time series}
+tuna_sales %>%
+  mutate(log_sales = log(sales)) %>%
+  ggplot(aes(week, log_sales, colour = brand)) +
+  geom_line(size = 1.3, show.legend = F) +
+  facet_wrap(facets = "brand", scales = "free") +
+  scale_x_continuous(breaks = seq(1, 400, 75)) +
+  labs(title = "Tuna brand volume time series plot from week 1 to week 398- Missing data evident around week 330",
+       subtitle = "Series shape similar for starkist, cs, bb chunk; lower volume brands also show similar spikes")
+```
+
+In the last visualization, I noticed what appeared to be a gap in the time series and wanted to investigate the reporting aberration further. I've isolated the sales volume for Bumble Bee large here where the missing data is clear. It appears that price wasn't reported from week 331 and week 372. With this in mind, there are 338 actual weeks but, with about a quarter year missing between records later in the series. For the modelling working being done here, this gap does not need to be addressed, though it would for time series applications.
+
+```{r individual plot for bb large for missing data review}
+tuna_sales %>%
+  filter(brand == "bb_large") %>%
+  ggplot(aes(week, sales)) +
+  geom_line(size = 1.3, colour = "dodgerblue2") +
+  annotate(geom = "rect", xmin = 331, xmax = 372, 
+           ymin = 0, ymax = 2020, 
+           alpha = .1, fill = "firebrick1") +
+  scale_x_continuous(breaks = seq(1, 400, 25)) +
+  labs(title = "Time series plot for Bumble Bee Large Cans tuna sales",
+       subtitle = "Plot highlights series has missing data between weeks 331 and 372 (light red shading)")
+```
+
+Before moving onto the price variables, I also wanted to evaluate how much share of the total weekly sales each brand experienced. To do this, I've divided each brand's sales volume per week by the total category sales. In the table below, Starkist had a median share of about 25% each week followed by Chicken of the Sea and HH Chunk. Of note, the market share median drops by almost 8% from Bumble Bee Chunk to Geisha demarcating the high and low volume brands. 
+
+```{r tuna share df and review}
+tuna_shares <- tuna_brands %>%
+  mutate(log_sales = log(total_sales)) %>%
+  mutate_at(vars(2:8), function(x) x / tuna_brands$total_sales) %>%
+  select(1:8) %>%
+  gather(key = "brand", value = "share", -week) %>%
+  mutate(brand = rep(brand_names, each = nrow(tuna)),
+         brand = factor(brand, levels = brand_names))
+
+share_table <- tuna_shares %>%
+  group_by(brand) %>%
+  summarise(brand_share_median = median(share)) %>%
+  mutate(brand_share_median = round(brand_share_median, 4) * 100) %>%
+  arrange(desc(brand_share_median))
+
+share_table %>% 
+  custom_kable()
+```
+
+Viewing these weekly shares from a time series perspective shows a variable category. The top share brand by average, Starkist, shows weeks with almost full market share followed shortly after by weeks with almost zero market share. There appears to be some seasonal component here but, the series resembles white noise and as such, probably has a strong stochastic component.  
+
+```{r tuna share time series}
+tuna_shares %>%
+  ggplot(aes(week, share, colour = brand)) +
+  geom_line(size = 1.3, show.legend = F) +
+  facet_wrap(facets = "brand", scales = "free") +
+  labs(title = "Tuna brand sale share time series plot from week 1 to week 398- Missing data evident around week 330",
+       subtitle = "Series shows week to week market shares are variable; Big 4 brands evident again")
+```
+
+Having reviewed volume, I'll switch focus here to price. To do so, I'm starting off with a quantile table for each brand's pricing. Immediately, it seems clear that there are three distinct price groups. Starkist, Chicken of the Sea, Bumble Bee Chunk, and HH chunk have very congruent price quantiles. Most have a price range of about 60 cents, although HH chunk is more narrow at around 36 cents. Combining this with the previous volume analysis, it's clear that these are low cost, high volume brands.
+
+The higher cost tuna brands here are Bumble Bee Solid, Geisha, and Bumble Bee large, although it is unique given how much higher the line's prices are. These more expensive brands have narrower price quantiles with Geisha and Bumble Bee solid at around .36 from the highest to low price. Bumble Bee large is in line with the less expensive brands with about a 60 cent price spread. The competitive landscape is clearer following the initial price quantile review as it appears there are low cost, high volume brands and more expensive, low volume brands.
+
+As a methodological note, I've also expoentiated the initial log prices here so they are more interpretable during the exploratory work. The final elasticity models will rely on both log volume and sales but, for now I find it more intuitive to work with the actual price levels.
+
+```{r price quantile table}
+tuna_brands %>%
+  select(10:16) %>%
+  apply(., 2, quantile) %>%
+  as.data.frame() %>%
+  mutate_all(function(x) exp(x)) %>%
+  rownames_to_column(var = "quantile") %>%
+  custom_kable()
+```
+
+Visualizing all the brand prices, it's clear that the distributions are all negatively skewed. This makes sense given the brands likely offer special discounts and promotions while trying to maintain profitability but, do not unnecessarily raise prices barring some wider business change.
+
+```{r tuna price histograms}
+tuna_prices <- tuna_brands %>%
+  select(week, lprice_starkist, lprice_cs,
+         lprice_bb_solid, lprice_bb_chunk, lprice_geisha, 
+         lprice_bb_large, lprice_hh_chunk) %>%
+  gather(key = "brand", value = "price", - week) %>%
+  mutate(price = exp(price),
+         brand = rep(brand_names, each = nrow(tuna)),
+         brand = factor(brand, levels = brand_names))
+
+tuna_prices %>%
+  ggplot(aes(price, fill = brand)) +
+  geom_histogram(bins = 20, show.legend = F) +
+  facet_wrap(facets = "brand", scales = "free") +
+  labs(title = "Histogram of tuna prices for all seven brands",
+       subtitle = "Brands all show negatively skewed price distribution")
+```
+
+The median price table again reaffirms that there are broadly three cost groups. Bumble Bee large is really an outlier and the most unique brand offering given it has a median price of $3.40. The other brands are largely split on median price above and below one dollar.
+
+```{r tuna brand price median table}
+price_table <- tuna_prices %>%
+  group_by(brand) %>%
+  summarise(median_price = median(price)) %>%
+  mutate(median_price = round(median_price, 2)) %>%
+  arrange(desc(median_price))
+
+price_table %>%
+  custom_kable()
+```
+
+The price time series shows the movement over 338 weeks. I made a comment earlier about not seeing any major price increases which is confirmed here. Starkist, HH chunk, and Bumble Bee chunk show modest price increases but otherwise, the brands mostly lower prices. The series shape, when coupled with the volume insights, leads me to believe the general production and operating costs for these brands are generally stable because the firms have not increased prices while sales have remained constant.
+
+Extrapolating further, my guess is this means that the space is a high profit margin category because inflation increases over 6.5 years should inherently affect costs somewhere but, these do not show up in price increases. However, this might also reflect a highly price sensitive consumer group that is not willing to pay higher prices for the good. Taken together, this sets up that these fluctuating discounts are tactical marketing opportunities firms are using to increase volume, which if the profit margin assumption is correct, is still a very profitable exercise. 
+
+Of course, this is only for one store chain so there are likely missing insights to enhance the analysis. While the exact explanation is not clear, and likely cannot decisively be pinned down here, these ideas help frame the competitive analysis given producers are bound but these possible market dynamics.
+
+```{r tuna price time series}
+tuna_prices %>%
+  ggplot(aes(week, price, colour = brand)) +
+  geom_line(size = 1.3, show.legend = F) +
+  facet_wrap(facets = "brand", scales = "free") +
+  labs(title = "Tuna brand price time series plot from week 1 to week 398- Missing data evident around week 330",
+       subtitle = "Pricing groups have similar series shape")
+```
+
+With univariate review for volume, share, and price, I'll work towards a more multivariate analysis. Starting this, I've developed and visualized a correlation matrix for the sales volume. The last row is particularly interesting given it represents each brand's volume correlation to the overall total. Here, it's clear that Chicken of the Sea volume is the only brand with a strong positive correlation with total sales. Additionally, BB large shows a negative correlation with total sales.
+
+```{r volume correlation matrix, fig.height=8, fig.width=11}
+tuna_brands %>%
+  select(2:9) %>%
+  cor() %>%
+  corrplot(method = "number", type = "lower", diag = F)
+```
+
+The large Chicken of Sea correlation stood out so I wanted to review the bivariate relationship more closely. As seen, the large coefficient is driven largely by four volume outliers. These volume spikes were evident during the univariate portion. To get a sense for how these few points affect the relationship, I filtered any records with a z-score of less than four. It's clear that they do exaggerate the correlation. 
+
+```{r cs vs total sales review}
+cs_sales <- tuna_brands %>%
+  ggplot(aes(move_cs, total_sales)) +
+  geom_jitter(colour = "dodgerblue2", alpha = .5) +
+  geom_smooth(method = "lm", se = F, colour = "darkorange", size = 1.3) +
+  labs(title = "Total sales vs CS sales with regession line",
+       subtitle = "Plot shows strong positive correlation but, with outliers driving association strength")
+
+cs_sales_update <- tuna_brands %>%
+  mutate(cs_zscore = scale(x = move_cs) %>% as.numeric()) %>%
+  filter(cs_zscore < 4) %>%
+  ggplot(aes(move_cs, total_sales)) +
+  geom_jitter(colour = "dodgerblue2", alpha = .5) +
+  geom_smooth(method = "lm", se = F, colour = "darkorange", size = 1.3) +
+  labs(title = "Total sales vs CS sales with outliers removed",
+       subtitle = "Sales correlation is greatly diminshed with four outliers taken out of sample")
+
+grid.arrange(cs_sales, cs_sales_update)
+```
+
+That said, it led me to think about which brands might see high correlations when there is a category sales spike. It appears that during the largest sales increases, Chicken of the Sea accounts for much of the volume. This may indicate that the brand tries to position the brand as a first mover and in turn, sees the largest sales boost.
+
+To evaluate this, I've included price as a third variable. As seen, the brand has the lowest prices during these volume increases. This adds some nuance to the high and low volume brand split. The plot seems to indicate that Chicken of the Sea, even amongst high volume brands, might be a brand setting the market, which other brands react too. 
+
+Again,it's still unclear if this is a certain day or event that causes the spike but, it seems that during these periods, Chicken of the Sea seems to lead the category volume. Additionally, this has not been formally modelled but, as an early insight, there does seem to be some brand differentiation here.
+
+As a final point, the plot also confirms that there is a negative, albeit slight, correlation between total sales and Bumble Bee large sales. The coefficient size is likely too small to read much into but, it might signal they attract transient consumers from the low cost brands during weeks when there isn't any major pricing promotion.
+
+```{r bivariate plot for each brand and total}
+tuna_brands %>%
+  select(2:9) %>%
+  gather(key = "brand", value = "sales", -total_sales) %>%
+  mutate(brand = rep(brand_names, each = nrow(tuna)),
+         brand = factor(brand, levels = brand_names)) %>%
+  cbind(tuna_prices$price) %>%
+  rename(price = "tuna_prices$price") %>%
+  ggplot(aes(sales, total_sales, colour = price, size = price)) +
+  geom_jitter(alpha = .5) +
+  geom_smooth(method = "lm", se = F, colour = "firebrick3", size = 1.3) +
+  facet_wrap(facets = "brand", scales = "free") +
+  scale_colour_gradient(low = "dodgerblue2", high = "darkorange") +
+  labs(title = "Total sales vs individual brand volumes with price variation coloured",
+       subtitle = "Positive correlations largely driven by high volume spikes- CS may be first mover on price drops given high volumes relative to total")
+```
+
+Below, I've constructed another correlation matrix with log total sales and each logged price. The variables represented in the matrix will form the multivariate sales regression model, so it's positive to see limited multicollinearity. That said, there isn't any strong negative correlations, so some of the coefficients might not be significant. From a theory standpoint though, seeing all the prices have negative correlations with log sales shows the expected elasticity relationship where as price increases, sales go down. 
+
+```{r price correlation matrix, fig.height=8, fig.width=11}
+tuna_brands %>%
+  select(-week) %>%
+  select(total_sales, lprice_starkist, 
+         lprice_cs, lprice_bb_solid, lprice_bb_chunk, lprice_geisha, 
+         lprice_bb_large, lprice_hh_chunk) %>%
+  mutate(log_sales = log(total_sales)) %>%
+  select(-total_sales) %>%
+  cor() %>%
+  corrplot(method = "number", type = "lower", diag = F)
+```
+
+I wanted to see how each sales and price relationship looked so I've constructed a faceted plot with all the brands. Five of the brands shows strong negative relationships but, both Bumble Bee large and solid seem less noteworthy. These two brands still likely have a significant price and sales association but, they do not seem as elastic.
+
+```{r log price vs sales for tuna brands}
+tuna_prices %>%
+  left_join(x = ., y = tuna_sales, by = c("week", "brand")) %>%
+  mutate(log_price = log(price),
+         log_sales = log(sales)) %>%
+  ggplot(aes(log_price, log_sales, colour = brand)) +
+  geom_jitter(alpha = .45, show.legend = F) +
+  geom_smooth(method = "lm", se = F, size = 1.3, show.legend = F) +
+  facet_wrap(facets = "brand", scales = "free") +
+  labs(title = "Log sales vs log price for tuna brands with regression lines",
+       subtitle = "Each brand shows negative correlation between price and sales; relationship is weaker for BB large and solid")
+```
+
+As the final EDA component, I wanted to look at the price and sales time series simultaneously. However, the scales for both series are different and do not line up well, even when both are log transformed. To avoid this, I've developed a faceted grid plot so both have independent scales.
+
+Even with this though, the price groups make it difficult to effectively visualize several brands at once since the higher prices distort the lower ones. As such, I've developed a function, `price_sales_series`, so the three price groups can be visualized with common code.
+
+The first plot is below, which features the low price group. As seen, the inverse relationship between the price and volume series is evident. This doesn't include any real evidence on the relationship's direction (i.e. if price influences demand or vice versa) but, it's clear they move together for these brands.
+
+```{r price vs sales time series for volume brands}
+price_sales_series <- function(tuna){
+  tuna_prices %>%
+    left_join(x = ., y = tuna_sales, by = c("week", "brand")) %>%
+    mutate(log_sales = log(sales)) %>%
+    select(-sales) %>%
+    gather(key = "set", value = "value", -week, -brand) %>%
+    filter(brand %in% c(tuna)) %>%
+    ggplot(aes(week, value, colour = brand)) +
+    geom_line(size = 1.3, show.legend = F) +
+    facet_grid(set ~ brand, scales = "free") +
+    scale_x_continuous(breaks = seq(1, 400, 75)) +
+    scale_colour_manual(values = c("dodgerblue2", "darkorange",
+                                   "darkorchid", "forestgreen"))
+}
+
+price_sales_series(tuna = c("starkist", "cs", "bb_chunk", "hh_chunk")) +
+  labs(title = "Price and sales time series for big 4 high volume tuna brands",
+       subtitle = "Price decreases seem to accompany sales increases")
+```
+
+The two higher cost brands, Bumble Bee solid and Geisha, also show inverse price and sales series. There's one strange sales dip for Bumble Bee solid where price also decreases but overall, the series seem to align with price elasticity theory. However, I don't these series seem as aligned as the previous four brands.
+
+```{r r price vs sales time series for high cost brands}
+price_sales_series(tuna =  c("geisha", "bb_solid")) +
+  labs(title = "Price and sales time series for BB solid and Geisha",
+       subtitle = "Price decreases seem to accompany sales increases; BB solid has one major sales decrease concurrent with lower prices")
+```
+
+The final series is for Bumble Bee large, which has a far higher price point. Bumble Bee large also has a large sales decrease at week 76. This downward spike, which was also evident for Bumble Bee solid, occurs during a time when the higher volume, lower price brands see sharp sales increases. This reaffirms the indication that these are secondary brands, not driving the category. This series does not seem to have as strong an inverse relationship between price and volume. Overall, it seems to a unique brand in the category from a product and relationship perspective. 
+
+```{r r price vs sales time series for bb large}
+price_sales_series(tuna = "bb_large") +
+  labs(title = "Price and sales time series for BB large",
+       subtitle = "Price decreases seem to accompany sales increases; However, the relationship does not seem as strong or ")
+```
+
+***
+
+###Price elasticity modelling
+
+####Simple linear models
+
+In the modelling section, I'll develop linear models for each brand where sales is the outcome variable and price is the predictor. In this model, both variables will be log transformed so it will be a logarithmic pricing model. To ensure each model's components can be reviewed at once, I've developed a function that creates each linear regression and collects summary statistics. Using this in conjunction with `map2`, I've created a data frame with all the estimated model components.
+
+The first value of interest is the price elasticity. This estimates the percent change in sales given a percent change in prices, with everything else being held constant. As expected, all the the values are negative, which conforms to microeconomic theory surrounding this relationship. To use one example, the Starkist model shows that for every unit increase in brand price, sales go down 3.9% The largest elasticity is Bumble Bee solid with a 5.9% decrease in sales for one unit price increase. Bumble Bee large has the lowest elasticity, which seemed evident in the initial bivariate price and sales plot.
+
+I've also included the adjusted R squared for each model. This provides insight into how much sales variance explained by price. Some of the bigger brands– like Starkist, Chicken of the Sea– as well Geisha have variance explanation for one term models. For these, price explains about half the sales variance, which is fairly large for a single predictor. The largest adjusted R squared is for Bumble Bee chunk at almost 60%. However, price explains almost no sales variance for Bumble Bee large and very little for the Bumble Bee solid. All considered, the adjusted R squared results also don't conform to the price volume split, though most of the high volume brands have high variance explanations. 
+
+```{r individual linear models}
+tuna_lm_summary <- function(move, price){
+  tuna_y <- tuna_brands %>%
+    select(move)
+  
+  tuna_x <- tuna_brands %>%
+    select(price)
+  
+  sales_lm <- lm(log(tuna_y[,1]) ~ tuna_x[,1])
+  
+  lm_summary <- summary(sales_lm)$coefficients[2,] %>%
+    t() %>%
+    as.data.frame()
+  
+  lm_summary <- lm_summary %>%
+    mutate(adj_rsq = summary(sales_lm)$adj.r.squared) %>%
+    rename(elasticity = Estimate) %>%
+    rename_all(tolower)
+  
+  return(lm_summary)
+}
+
+move_cols <- c(2, 3, 4, 5, 6, 7, 8)
+
+price_cols <- c(10, 11, 12, 13, 14, 15, 16)
+
+lm_summaries <- map2_df(.x = move_cols, .y = price_cols, function(x, y)
+  tuna_lm_summary(move = x, price = y)) %>%
+  mutate(brand = brand_names) %>%
+  select(brand, everything())
+
+lm_summaries %>%
+  custom_kable()
+```
+
+####Multivariate logarithmic pricing models
+
+The multivariate pricing models are an extension of the initial linear models. The model coefficients here are cross elasticities though, which help reveal how a specific brand's sales change with price changes across all brands. I've also taken the same approach to developing these models by creating a function to run each at the same time.
+
+Prior to reviewing the result, it's worth spending time on how to interpret the cross elasticities. Since both the outcome and predictors have been log transformed, the regression coefficients indicate percentage changes. Specifically, this means that for every unit increase in a brand price, brand sales change by a certain percent. With this in mind, I've visualized all the multivariate model coefficients below and provided some initial commentary:
+
+#####Starkist
+
+- Positive and significant coefficients for HH chunk, Chicken of the Sea, and Bumble Bee Chunk. This is in line with the exploratory work from a competitive standpoint.
+- Negative elasticity for Geisha but, not significant p-value
+
+#####Chicken of the Sea
+
+- Positive and significant coefficients for Starkist and Bumble Bee Chunk. This is in line with the exploratory work from a competitive standpoint.
+- Negative elasticity for Geisha but, not significant p-value
+
+#####Bumble Bee Solid
+
+- Positive and significant coefficients for Geisha. This is in line with the exploratory work from a competitive standpoint.
+- Negative elasticity for Starkist and Bumble Bee large but, not significant p-value
+
+#####Bumble Bee Chunk
+
+- Positive and significant coefficients for Starkist and Chicken of the Sea. This is in line with the exploratory work from a competitive standpoint.
+- Negative elasticity for HH chunk but, not significant p-value
+
+#####Geisha
+
+- No positive and significant coefficients for brand
+- Negative elasticity for Bumble Bee solid and large but, not significant p-value
+- Offers very little evidence for competition
+
+#####Bumble Bee large
+
+- No positive and significant coefficients for brand
+- Negative and significant elasticity for HH chunk
+- One of three brands with a significant negative cross elasticity
+
+#####HH Chunk
+
+- Positive and significant coefficients for Starkist. This is in line with the exploratory work from a competitive standpoint.
+- Negative and significant elasticity for Bumble Bee large. This cross elasticity is larger than the actual HH chunk value.
+- One of three brands with a significant negative cross elasticity
+
+This modelling work reinforces the high volume, low cost competitive space. Starkist seems to be the top brand here given it has significant positive cross elasticities for the next three competitors in the space. For example, a percentage rise in Starkist prices results in about 1.19% added sales for Chicken of the Sea. I think this indicates that if the brand increases prices, consumers look at another low cost brand but otherwise, stay with Starkist. The lower value group shows less conclusive results.
+
+Perhaps the most sclerotic cross elasticity can be found in the HH chunk model. There is a large negative cross elasticity which indicates that a percentage rise in the Bumble Bee large price results in a sales decline of about 4.32% for HH chunk. The value is larger than it's own price elasticity in the model, which is not intuitive.
+
+This highlights one of the main limitations of these models: the coefficients can change signs when aggregated. While each model's own elasticity remained interpretable, the cross elasticity interpretation are contrary to the basic ideas of consumer behaviour. 
+
+```{r developing cross elasticities}
+tuna_cross_elasticities <- function(tuna_brand, num){
+  tuna_y <- tuna %>%
+    select(tuna_brand) %>%
+    mutate_all(function(x) log(x))
+  
+  cross_elasticities <- tuna_brands %>%
+    select(10:16) %>%
+    lm(tuna_y[,1] ~ ., data = .) %>%
+    summary() %>%
+    coefficients() %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "variable") %>%
+    rename(cross_elasticity = Estimate,
+           coef_pvalue = "Pr(>|t|)") %>%
+    mutate(brand = brand_names[num],
+           coef_significance = ifelse(coef_pvalue < .05, 
+                                      "significant", "not_significant")) %>%
+    select(brand, everything())
+}
+
+map2_df(names(tuna)[2:8], c(1:7), function(x, y)
+  tuna_cross_elasticities(tuna_brand = x, num = y)) %>%
+  filter(variable != "(Intercept)") %>%
+  mutate(brand = factor(brand, levels = brand_names)) %>%
+  ggplot(aes(variable, cross_elasticity, fill = coef_significance)) +
+  geom_col() +
+  facet_wrap(facets = "brand", scales = "free") +
+  coord_flip() +
+  scale_fill_manual(values = c("darkorange", "dodgerblue2")) +
+  theme(legend.position = c(0.5, 0.15)) +
+  labs(title = "Log pricing model cross elasticities derived from: sales ~ all brand prices",
+       subtitle = "Cross elasticities help show effect on invidual brand sales from all category prices",
+       x = NULL)
+```
+
+The model's I developed also are limited because they have constant elasticities, which implies that these effects are uniform across the series. To review how these look at different points in the time series, I redeveloped the previous cross elasticity function to allow model development in different windows.
+
+Essentially, the function fits a model for the first year and a half (from week 1 to 78) and then slowly moves through the series with this window until week 338. The approach yields 261 models that can be individually analyzed to understand how the cross elasticities change over time. While this doesn't negate time, the models, when taken together, at least show the dynamic changes in brand sales and prices. The plot below visualizes these changes.
+
+```{r rolling cross elasticity work with price vis}
+tuna_cross_elasticities <- function(tuna_brand, start, end){
+  tuna_y <- tuna %>%
+    select(tuna_brand) %>%
+    mutate_all(function(x) log(x))
+  
+  lm_set <- tuna_brands %>%
+    mutate(y = tuna_y[,1]) %>%
+    select(10:17)
+  
+  cross_lm <- lm(y ~ ., data = lm_set[start:end,])
+  
+  cross_coef <- summary(cross_lm)$coefficients %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "variable") %>%
+    rename(cross_elasticity = Estimate,
+           coef_pvalue = "Pr(>|t|)") %>%
+    mutate(brand = tuna_brand,
+           model = rep(start, times = 8)) %>%
+    filter(variable != "(Intercept)") %>%
+    mutate(coef_significance = ifelse(coef_pvalue < .05, 
+                                      "significant", "not_significant")) %>%
+    select(brand, model, everything())
+  
+    return(cross_coef)
+}
+
+start_period <- seq(1, nrow(tuna) - 77, 1)
+
+end_period <- seq(78, nrow(tuna), 1)
+
+rolling_tuna_crosses <- map_df(.x = 2:8, function(z)
+  map2_df(
+    .x = start_period, .y = end_period, function(x, y)
+    tuna_cross_elasticities(tuna_brand = names(tuna)[z], 
+                            start = x, 
+                            end = y)
+    )
+) %>% mutate(brand = rep(brand_names, each = length(start_period) * 
+                           length(brand_names)),
+             brand = factor(brand, levels = brand_names))
+
+rolling_tuna_crosses %>%
+  filter(brand == "starkist") %>%
+  ggplot(aes(model, cross_elasticity, colour = variable)) +
+  geom_line(size = 1.3, show.legend = F) +
+  facet_wrap(facets = "variable", scales = "free") +
+  scale_x_continuous(breaks = seq(1, 400, 75)) +
+  labs(title = "Cross elasticities for Starkist sales vs all other brand prices",
+       subtitle = "Plot shows dynamic nature of cross values over time")
+```
+
+To get a more aggregate picture of the cross elasticities, I've taken the median values for both brand sales and price using `group_by`. Following this, I've added in coefficient significance percentages. The approach seems to clean up some of the contradictory, positive cross elasticities. Moreover, the remaining ones have a quantified significance colouring so they can be assessed more clearly.
+
+An interesting trend here is Geisha being the recipient of customers from the low cost brands during price increases. Looking at Chicken of the Sea, Geisha sees around 2% sales increase during a percentage raise for the brand. Similar trends can be seen for Starkist, Bumble Bee solid, and Bumble Bee large. It seems consumers might choose the brand during periods when the low cost options aren't being offered on special. For Bumble Bee large, it might just be consumers in the same high cost space.
+
+```{r rolling cross elasticity interpretations}
+rolling_cross_coefs <- rolling_tuna_crosses %>%
+  group_by(brand, variable) %>%
+  summarise(cross_median = median(cross_elasticity))
+
+rolling_cross_coefs <- rolling_tuna_crosses %>%
+  count(brand, variable, coef_significance) %>%
+  filter(coef_significance == "significant") %>%
+  mutate(percent_sig = n / length(start_period)) %>%
+  right_join(x = ., y = rolling_cross_coefs, by = c("brand", "variable")) %>%
+  select(-n) %>%
+  mutate(percent_sig = ifelse(is.na(percent_sig), 0, percent_sig))
+
+rolling_cross_coefs %>%
+  ggplot(aes(variable, cross_median, fill = percent_sig)) +
+  geom_col() +
+  facet_wrap(facets = "brand", scales = "free") +
+  coord_flip() +
+  scale_fill_gradient(low = "dodgerblue2", high = "darkorange") +
+  theme(legend.position = c(0.5, 0.15)) +
+  labs(title = "Median cross elasticities for each brand's multivariate pricing result across 261 time period models",
+       subtitle = "Dynamic modelling helps with negative price coefficients- cross elasticities seem more interpretable",
+       x = NULL)
+```
+
+####Multivariate category sales models
+
+The next model to consider is the log transformed total category sales as the outcome with log prices as the predictors. I've started be developing the full linear model. The coefficients for both Geisha and Bumble Bee large now show positive percentage increases. This seems unlikely given tuna is almost certainly not a Giffen good. This plausibly could be because there's increased demand, resulting in higher sales, alongside a price increase. That said, there wasn't any major upward sales trend for either of these brands, although the large cans did have a slight increase.
+
+Instead, the results highlight that each brand has a very different volume and price coefficient when viewed individually than when aggregated. This is an example of Simpson’s Paradox, also called the Yule-Simpson effect, whereby a trend or relationship that is observed within a group reverses when the groups are combined (Berman et. al, 2012). The effect arises due to a confounding variable which skews the overall results.
+
+Here, I think time is the confounding variable because there are different macroeconomic and marketing activities shaping the price and volume relationship over the series. This outside knowledge helps put the results in perspective. After seeing this summary, the cross elasticities seem hard to trust. Again, the regression approach doesn't pick up the time interaction well so the model interpretation suffers. This effect hinders both multivariate approaches.
+
+The inherent confounding effect of time limits the linear model cross elasticities. As a result of this, I wanted to try and evaluate how these coefficients changed at different points in the series so the time component could be better understood. To do this, I developed a function to take the multivariate log pricing model on a rolling basis across the time series.
+
+```{r full sales and price lm}
+tuna_brands <- tuna_brands %>%
+  mutate(log_sales = log(total_sales))
+
+tuna_sales_lm <- lm(log_sales ~ lprice_starkist + lprice_cs +
+                      lprice_bb_solid + lprice_bb_chunk + lprice_geisha +
+                      lprice_bb_large + lprice_hh_chunk,
+                    data = tuna_brands)
+
+summary(tuna_sales_lm)
+```
+
+Before moving on, I also wanted to see if multicollinearity was affecting the coefficients, which could conceivably alter the model components. This can be done using a variance inflation factor table where values over four require more review. However, the VIF values are all very low, indicating very little multicollinearity. This was somewhat expected given the initial correlation matrix didn't show any issues but, I thought it was worth evaluating.
+
+```{r vif review}
+vif(mod = tuna_sales_lm) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "variable") %>%
+  rename(vif = ".") %>%
+  arrange(desc(vif)) %>%
+  custom_kable()
+```
+
+As with the other multivariate model, I've developed a function to assess how the coefficients change over the series. The first plot I've constructed shows the changing variance explanations using adjusted R squared. At the peak, the brand prices explain nearly 70% of sales variance while at the lowest, the model captures about 23%. These times (week 77 to 154 and week 131 to 208) each show large price and volume swings so they might be indicative of changing economic changes or heavy marketing activities.
+
+```{r rolling tuna lm}
+rolling_tuna_lm <- function(start, end){
+  tuna_sales_lm <- lm(log_sales ~ lprice_starkist + lprice_cs +
+                        lprice_bb_solid + lprice_bb_chunk + lprice_geisha +
+                        lprice_bb_large + lprice_hh_chunk,
+                      data = tuna_brands[start:end,])
+  
+  coef_pvalues <- summary(tuna_sales_lm)[4]
+  coef_pvalues <- coef_pvalues$coefficients[2:8, 4]
+  
+  model_coef <- coef(tuna_sales_lm) %>%
+    as.data.frame() %>%
+    rename(price_coef = ".") %>%
+    rownames_to_column(var = "brand") %>%
+    filter(brand != "(Intercept)") %>%
+    mutate(brand = rep(brand_names, each = 1),
+           brand = factor(brand, levels = share_table$brand),
+           coef_pvalue = round(coef_pvalues, 4),
+           coef_significance = ifelse(coef_pvalue < .05, 
+                                      "significant", "not_significant"),
+           model = rep(start, times = 7)) %>%
+    select(model, everything())
+  
+  model_components <- list(tuna_lm = tuna_sales_lm,
+                           coef = model_coef)
+  
+  return(model_components)
+}
+
+tuna_coef <- map2(start_period, end_period, 
+                     function(x, y) rolling_tuna_lm(start = x, end = y))
+
+tuna_model_fit <- list(
+  adj_rsq = map(1:length(start_period), function(x) 
+    summary(tuna_coef[[x]]$tuna_lm)$adj.r.squared),
+  fstatistic = map(1:length(start_period), function(x) 
+    summary(tuna_coef[[x]]$tuna_lm)$fstatistic[1])
+  ) %>% map_df(unlist) %>%
+  mutate(model = seq(1, n(), 1)) %>%
+  select(model, adj_rsq, fstatistic)
+
+tuna_model_fit %>%
+  ggplot(aes(model, adj_rsq, size = fstatistic, colour = fstatistic)) +
+  geom_point() +
+  scale_x_continuous(breaks = seq(1, 300, 25)) +
+  scale_y_continuous(breaks = seq(0, 1, .05)) +
+  scale_size_continuous(guide = F) +
+  scale_colour_gradient(low = "dodgerblue2", high = "darkorange") +
+  labs(title = "Adjusted R2 for dynamic regression modelling of price and sales",
+       subtitle = "Largest variance explanation around 70%- might signal heavy promotional phase")
+```
+
+The main reason I wanted to develop these models though was to review the coefficient changes. Below, I've included each brands coefficient values plotted over the 261 models with colouring for significance. Another piece of the competitive landscape becomes evident here, namely which brand prices are consistently significant, and thereby associated with total log sales, over time. 
+
+For example, every Chicken of the Sea coefficient is significant. This bolsters the idea that the brand might be influential pushing the category pricing structure. I previously suggested they might be a first mover, as was first suggested when examining their price and sales correlations, and this intuition is furthered here. In the same vein, Bumble Bee large has very few significant coefficients and therefore, does not have a strong association with total category sales. 
+
+While this doesn't correct for the Yule-Simpson effect, which likely causes the cross elasticity sign changes, I think this adds another interpretable dimension for the competitive analysis. 
+
+```{r rolling coefficient interpretation, fig.height=9, fig.width=12}
+rolling_tuna_coef <- map_df(1:length(start_period), function(x) tuna_coef[[x]]$coef)
+
+rolling_tuna_coef %>%
+  ggplot(aes(model, price_coef, colour = coef_significance)) +
+  geom_point(size = 1.3) +
+  geom_hline(yintercept = 0, size = 1.5, alpha = .4, colour = "darkgray") +
+  facet_wrap(facets = "brand", scales = "free", nrow = 2) +
+  scale_colour_manual(values = c("darkorange", "dodgerblue2")) +
+  labs(title = "Price coefficients from rolling log price modelling for each brand",
+       subtitle = "CS has all negative elasticities and significant coefficients- highlights brand prices always associated with total category sales")
+```
+
+Additionally, because the modelling approach yields numerous elasticities, their median value can be derived. I think these are better for interpreting how each brand is affecting the overall segment because there is a time dimension being added. Chicken of the Sea has the most impactful median elasticity. The coefficient indicates that for every percentage increase in brand price, total category sales go down about 1.76%. Once again, the higher volume brands all have the most impactful elasticities here.
+
+This approach also corrected for Geisha's positive elasticity. The -.14 seems to conform to the brand being a more specialty offering with higher prices and lower volume as well. However, the Bumble Bee large coefficient is still positive. This might indicate that for every unit increase in brand price, total category sales go up slightly because consumers prefer smaller lower cost cans. While this seems plausible, the modelling approach is known for this limitation, so I'm still skeptical of the median elasticity here.
+
+```{r cross elasticity medians from rolling lms}
+cross_medians <- rolling_tuna_coef %>%
+  group_by(brand) %>%
+  summarise(median_lm_coef = median(price_coef))
+
+cross_medians %>%
+  arrange(median_lm_coef) %>%
+  custom_kable()
+```
+
+***
+
+###Final competitive mapping
+
+The preceding analysis has provided comprehensive insights which can be used to better understand the tuna category's competitive structure. As a final step, I'm putting together several of the findings so the structure is more clear. Below, the table includes volume, share, price, and elasticity metrics for each brand.  
+
+It seems clear that at a high level the brands are split into high volume, low cost and low volume, high cost groups. However, this is too simplistic and does not include any refining points from the modelling work. The top group, which includes four brands, is led by Starkist. The firm has the largest sales volumes and weekly share median alongside the lowest median price. Adding in some outside knowledge, Starkist has been around for a long time and is an established brand category leader. 
+
+This long standing dominance is crucial to understanding the competitive landscape, especially in the high volume group. Direct competitors Chicken of the Sea and Bumble Bee chunk have smaller volume and share but, seem to be leaders in the pricing structure. This concept was reinforced during the multivariate log pricing modelling. 
+
+Chicken of the Sea has a significant elasticity in every rolling total log sales pricing model while Bumble Bee chunk had about 85% significant coefficients. I think this indicates both brands have a strong influence on the pricing direction but, that Starkist adjusts to accommodate this while still benefiting from established brand recognition. The fourth member of this group, HH chunk, seems to be a more upstart brand with lower prices but, less influence over the total category as seen in lower median cross elasticities and significant cross elasticities.
+
+In the low volume, high cost group, further competition nuance is apparent when examining the metrics table. As has been established, Bumble Bee large is the highest price brand. Across all the brands represented, I think it's the most unique offering making it a more niche product. As a result of this, it has very little influence over the total category.
+
+Geisha and Bumble Bee solid are more comparable brands. They have the highest individual median price elasticities (taken from the rolling cross models), which I think reflects consumers being motivated to buy more of these when they have reduced prices given they are a luxury item in the category. However, I think Bumble Bee solid is the clear influencer in the second group given a high median cross elasticity and percentage of significant cross elasticities. Of note, Bumble Bee as a firm has three distinct brands here which further shows the company has likely tried to span the segments competitive positions.
+
+```{r final competitive thoughts, warning=FALSE}
+cross_elasticity_table <- rolling_cross_coefs %>%
+  filter(cross_median < -2) %>%
+  rename(median_elasticity = cross_median) %>%
+  select(brand, median_elasticity)
+
+tuna_competition <- rolling_tuna_coef %>%
+  filter(coef_significance == "significant") %>%
+  count(brand, sort = T) %>%
+  mutate(percent_sig = round(n / length(start_period), 4) * 100) %>%
+  select(-n) %>%
+  inner_join(x = ., y = volume_table, by = "brand") %>%
+  inner_join(x = ., y = price_table, by = "brand") %>%
+  inner_join(x = ., y = share_table, by = "brand") %>%
+  inner_join(x = ., y = cross_elasticity_table, by = "brand") %>%
+  inner_join(x = ., y = cross_medians, by = "brand") %>%
+  rename(lm_coef_sig = percent_sig,
+         median_share = brand_share_median) %>%
+  select(brand, median_volume, median_price, median_share, 
+         median_elasticity, lm_coef_sig, median_lm_coef)
+
+tuna_competition %>%
+  arrange(desc(median_volume)) %>%
+  custom_kable()
+```
+
+This competitive landscape can be visualized using a quadrant plot. Here, I've plotted the log price and sales and created the quadrant by including the median for each variable. This makes four groups: 
+
+- high cost, high volume
+
+- high cost, low volume
+
+- low cost, low volume
+
+- low cost, high volume
+
+As seen, and explained in the last table, the brands here fall into only two groups. The previous insights from the metrics table are more clear here. Bumble Bee large is the most unique brand with low influence and elasticity, Bumble Bee solid and Geisha directly compete in the more luxurious high cost market with high elasticities, Bumble Bee chunk, HH chunk, and Chicken of the sea are locked in a competitive low cost group trying to influence the category to combat Starkist's brand dominance. The visualization helps bolster the exploratory and modelling phase by putting the major insights into one place.
+
+```{r competitive analysis quadrant plot}
+tuna_competition %>%
+  mutate(median_elasticity = median_elasticity * -1,
+         log_price = log(median_price),
+         log_sales = log(median_volume)) %>%
+  ggplot(aes(log_sales, log_price, label = brand,
+             size = median_elasticity, colour = lm_coef_sig)) +
+  geom_point(alpha = .5) +
+  annotate(geom = "text", label = "BB_large", colour = "gray10", fontface = 4,
+           x = -Inf, y = Inf, hjust = -.9, vjust = 2) +
+  annotate(geom = "text", label = "BB_solid", colour = "gray10", fontface = 4,
+           x = 7.75, y = .5, hjust = -.9, vjust = -1) +
+  annotate(geom = "text", label = "Geisha", colour = "gray10", fontface = 4,
+           x = 7.75, y = .5, hjust = -1.4, vjust = 2.75) +
+  annotate(geom = "text", label = "Starkist", colour = "gray10", fontface = 4,
+           x = Inf, y = -Inf, hjust = 1.25, vjust = -1.15) +
+  annotate(geom = "text", label = "BB_chunk", colour = "gray10", fontface = 4,
+           x = 8.55, y = -.19, hjust = .6, vjust = .5) +
+  annotate(geom = "text", label = "HH_chunk", colour = "gray10", fontface = 4,
+           x = 8.55, y = -.19, hjust = .4, vjust = 2.85) +
+  annotate(geom = "text", label = "CS", colour = "gray10", fontface = 4,
+           x = 8.85, y = -.19, hjust = -.35, vjust = .5) +
+  geom_vline(xintercept = median(log(tuna_sales$sales)), size = 1.75, 
+             alpha = .75, colour = "darkgray") +
+  geom_hline(yintercept = median(log(tuna_prices$price)), size = 1.75, 
+             alpha = .75, colour = "darkgray") +
+  scale_size_continuous(range = c(5, 15),
+                        breaks = c(3, 4, 5),  
+                        labels = c(-3, -4, -5)) +
+  scale_colour_gradient(low = "dodgerblue2", high = "darkorange") +
+  scale_y_continuous(breaks = seq(-.3, 2, .25)) +
+  scale_x_continuous(breaks = seq(6, 11, .25)) +
+  labs(title = "Competitive analysis quadrant mapping for tuna category",
+       subtitle = "Price and sales medians split brands into two groups: High cost & low volume and low cost & high volume")
+```
+
+***
+
+###Analysis limitations
+
+While the pricing models and wider competitive analysis is robust, this approach comes with limitations. The resulting price elasticities are constant and therefore uniform across time and brand when using simple linear models. This assumption is debatable but, without any nuanced knowledge of the canned tuna segment, I think the approach is still reasonable. 
+
+When using the multivariate log pricing modelling approach, the resulting cross price elasticities have a tendency to switch signs, which happens with Bumble Bee large and Geisha, among others. This is contrary to any microeconomic theory and, more generally, doesn't make business sense. As a result, the model interpretation suffers. That said, I tried to reduce this issue with the dynamic modelling so the cross elasticities could be reviewed across many models so a median could be derived. While not a perfect solution, I think it helps alleviate some of the multivariate modelling limitations. 
+
+More widely, I tried to conduct a robust exploratory analysis so there was an empirical base for better understanding the category dynamic. I think the data set is missing crucial data on seasonality, promotional activity, and actual date times. These hinder the analysis because they are likely influential on the initial volume, share, and prices. To overcome this, I provided a thorough review and provided my intuition and extrapolations from the results. The combination of the modelling work and this exploratory phase help illuminate the category's competitive workings, which I've done to address both sections limitations.   
+
+***
+
+###References
+
+####1. Berman et. al, “Simpson’s Paradox: a cautionary tale in advanced analytics”
+####Access: https://www.statslife.org.uk/the-statistics-dictionary/2012-simpson-s-paradox-a-cautionary-tale-in-advanced-analytics
+
+***
